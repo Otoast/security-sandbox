@@ -1,0 +1,93 @@
+- name: Target Machine Setup (Windows)
+  hosts: target_windows
+  become: yes
+  become_method: runas
+  vars:
+    elasticsearch_version: "9.1.5" # Can update with any version if needed (watch for compatability!)
+    kibana_version: "9.1.5" # Can update with any version if needed (watch for compatability!)
+    elastic_agent_version: "9.1.5" # Can update with any version if needed (watch for compatibability!)
+    elasticsearch_dir: "C:\\elasticsearch-{{ elasticsearch_version }}"
+    kibana_dir: "C:\\kibana-{{ kibana_version }}"
+
+  tasks:
+    - name: Elasticsearch Download and Unzip
+      tasks:
+        - name: Obtain Elasticsearch Setup ZIP
+          win_get_url:
+            url: "https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-{{ elasticsearch_version }}-windows-x86_64.zip"
+            dest: "C:\\Users\\Public\\Downloads\\Elasticsearch.zip"
+        - name: Unzip Elasticsearch
+          win_unzip:
+            src: "C:\\Users\\Public\\Downloads\\Elasticsearch.zip"
+            dest: "C:"
+            delete_archive: yes
+
+    - name: Elasticsearch Service Start and Configuration
+      tasks:  
+        - name: Elasticsearch service install
+          win_command: "{{ elasticsearch_dir }}\\bin\\elastcsearch-service.bat install"
+        - name: Start Elasticsearch Service
+          win_command: "{{ elasticsearch_dir }}\\bin\\elastcsearch-service.bat start"
+        - name: Password reset for elastic superuser
+          win_command: "{{ elasticsearch_dir }}\\bin\\elasticsearch-reset-password -u elastic --batch"
+          register: reset_output
+        - debug:
+            msg: "New password has been made for elastic superuser. Please refer to the output below:\n{{ reset_output.stdout_lines }}"
+        - name: Wait and Check for Elasticsearch to be available
+          win_uri:
+            url: "http://localhost:9200"
+            method: GET
+            status_code: 200
+            return_content: yes
+            timeout: 30
+            register: es_check
+            retries: 10
+            delay: 15
+            until: es_check.status == 200
+
+    - name: Kibana Download and Unzip
+      tasks:
+      - name: Obtain Kibana Setup ZIP
+        win_get_url:
+          url: "https://artifacts.elastic.co/downloads/kibana/kibana-{{ kibana_version }}-windows-x86_64.zip" 
+          dest: "C:\\Users\\Public\\Downloads\\Kibana.zip"
+      - name: Unzip Kibana
+        win_unzip:
+          src: "C:\\Users\\Public\\Downloads\\Kibana.zip"
+          dest: "C:"
+          delete_archive: yes
+      
+    - name: Kibana Service start and Configuration
+      tasks:
+      - name: Get enrollment token
+        win_command: "{{ elasticsearch_dir }}\\bin\\elasticsearch-create-enrollment-token.bat -s kibana"
+        register: enrollment_token
+      - name: Configure kibana with enrollment token
+        win_command: "{{ kibana_dir }}\\bin\\kibana-setup --enrollment-token {{ enrollment_token }}"
+      - name: Create Kibana service with sc.exe
+        win_command: sc create Kibana binPath= "\"{{ kibana_home }}\\bin\\kibana.bat\"" start= auto
+        args:
+          chdir: "{{ kibana_home }}\\bin"
+      - name: Start Kibana service
+        win_service:
+          name: Kibana
+          state: started
+
+    - name: Elastic Agent Download and Unzip
+      tasks: 
+       - name: Obtain Elastic Agent Setup ZIP
+         win_get_url:
+           url: https://artifacts.elastic.co/downloads/beats/elastic-agent/elastic-agent-{{ elastic_agent_version }}-windows-x86_64.zip
+            dest: "C:\\Users\\Public\\Downloads\\ElasticAgent.zip"
+        - name: Unzip Elastic Agent
+          win_unzip:
+            src: "C:\\Users\\Public\\Downloads\\ElasticAgent.zip"
+            dest: "C:"
+            delete_archive: yes
+    - name: Elastic Agent Install and Start
+ 
+
+# Things that might need to be done:
+# - Make kibana accessible remotely and not just localhost
+# - make elasticsearch accessible remotely and not just localhost
+# - elasticsearch self-signed certs and https
