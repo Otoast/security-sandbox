@@ -8,7 +8,7 @@
     elastic_agent_version: "9.1.5" # Can update with any version if needed (watch for compatibability!)
     elasticsearch_dir: "C:\\elasticsearch-{{ elasticsearch_version }}"
     kibana_dir: "C:\\kibana-{{ kibana_version }}"
-
+    elastic_agent_dir: "C\\elastic-agent-{{elastic_agent_version}}-windows-x86_64"
   tasks:
     - name: Elasticsearch Download and Unzip
       tasks:
@@ -31,8 +31,11 @@
         - name: Password reset for elastic superuser
           win_command: "{{ elasticsearch_dir }}\\bin\\elasticsearch-reset-password -u elastic --batch"
           register: reset_output
+        - name: Extract password from reset 
+          set_fact:
+              elastic_password: "{{ reset_output.stdout | regex_search('New value:\\s*(\\S+)', '\\1') }}"
         - debug:
-            msg: "New password has been made for elastic superuser. Please refer to the output below:\n{{ reset_output.stdout_lines }}"
+            msg: "New password has been made for elastic superuser:\nValue: {{ elastic_password }}.\nPlease remember this password."
         - name: Wait and Check for Elasticsearch to be available
           win_uri:
             url: "http://localhost:9200"
@@ -84,10 +87,30 @@
             src: "C:\\Users\\Public\\Downloads\\ElasticAgent.zip"
             dest: "C:"
             delete_archive: yes
-    - name: Elastic Agent Install and Start
- 
+    
+    # NOTE: typically you'd use an API key w/ managed permissions to setup but since its contained lab going to go easier route
+    - name: Elastic Agent Configure, Install, and Start
+      tasks:
+        - name: Insert username
+          win_replace:
+            path: "{{ elastic_agent_dir}}\\elastic-agent.yml"
+            regexp: "#username:.*$"
+            replace: 'username: "elastic"'
+        - name: Insert password 
+          win_replace:
+            path: "{{ elastic_agent_dir}}\\elastic-agent.yml"
+            regexp: "#password:.*$"
+            replace: 'password: {{ elastic_password }}"'
+        - name: Remove api key
+          win_replace:
+            path: "{{ elastic_agent_dir}}\\elastic-agent.yml"
+            regexp: "api_key:.*$"
+            replace: ""
+        - name: Run agent service
+          win_command: "{{ elastic_agent_dir }}\\elastic-agent.exe install --url=\"http://localhost:9200\" --force --insecure"
 
 # Things that might need to be done:
 # - Make kibana accessible remotely and not just localhost
 # - make elasticsearch accessible remotely and not just localhost
 # - elasticsearch self-signed certs and https
+# - elastic agent probably needs less permissions than superuser, and should use api key
