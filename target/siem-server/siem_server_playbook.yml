@@ -1,0 +1,155 @@
+---
+- name: Configure SIEM Server (Elasticsearch, Kibana, Fleet)
+  hosts: siem_server
+  become: yes
+
+  # --- Required Variables ---
+  # For 'siem_password', use a strong password you create.
+  # For 'siem_private_ip', get this from your AWS EC2 console.
+  vars:
+    siem_password: "" # CHANGE THIS!
+    siem_private_ip: "" # CHANGE THIS!
+    elastic_version: ""  # Using a fixed version for lab consistency
+
+  tasks:
+    - name: Update APT cache
+      ansible.builtin.apt:
+        update_cache: yes
+
+    - name: Install prerequisite packages
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - gpg
+        state: present
+
+    # --- Elastic APT Repository ---
+    - name: Add Elastic GPG key
+      ansible.builtin.get_url:
+        url: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+        dest: /usr/share/keyrings/elastic-archive-keyring.gpg
+        mode: '0644'
+        force: yes
+
+    - name: Add Elastic repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/elastic-archive-keyring.gpg] https://artifacts.elastic.co/packages/{{ elastic_version.split('.')[0] }}.x/apt stable main"
+        filename: elastic-{{ elastic_version.split('.')[0] }}.x
+        state: present
+        update_cache: yes
+
+    # ---Install & Configure Elasticsearch ---
+    - name: Install Elasticsearch
+      ansible.builtin.apt:
+        name: "elasticsearch={{ elastic_version }}"
+        state: present
+
+    - name: Configure Elasticsearch (elasticsearch.yml)
+      ansible.builtin.lineinfile:
+        path: /etc/elasticsearch/elasticsearch.yml
+        regexp: "^{{ item.key }}:"
+        line: "{{ item.key }}: {{ item.value }}"
+        owner: root
+        group: elasticsearch
+        mode: '0660'
+      loop:
+        - { key: 'network.host', value: '0.0.0.0' } # Listen on all network interfaces
+        - { key: 'discovery.type', value: 'single-node' } # Set up as a single-node cluster
+        - { key: 'xpack.security.enabled', value: 'true' }
+        - { key: 'xpack.security.http.ssl.enabled', value: 'false' } # Disable SSL for simplicity in this lab
+      notify: Restart Elasticsearch
+
+    - name: Start and enable Elasticsearch service
+      ansible.builtin.service:
+        name: elasticsearch
+        state: started
+        enabled: yes
+
+    - name: Wait for Elasticsearch to start
+      ansible.builtin.wait_for:
+        port: 9200
+        host: localhost
+        delay: 10
+        timeout: 120
+      
+    - name: Set 'elastic' superuser password
+      ansible.builtin.shell:
+        cmd: "echo '{{ siem_password }}' | /usr/share/elasticsearch/bin/elasticsearch-users password elastic -b"
+      register: set_elastic_pass
+      changed_when: set_elastic_pass.rc == 0
+      failed_when: set_elastic_pass.rc != 0 and "unchanged" not in set_elastic_pass.stderr
+
+    # --- Install & Configure Kibana ---
+    - name: Install Kibana
+      ansible.builtin.apt:
+        name: "kibana={{ elastic_version }}"
+        state: present
+
+    - name: Configure Kibana (kibana.yml)
+      ansible.builtin.lineinfile:
+        path: /etc/kibana/kibana.yml
+        regexp: "^{{ item.key }}:"
+        line: "{{ item.key }}: {{ item.value }}"
+      loop:
+        - { key: 'server.host', value: '0.0.0.0' } # Listen on all interfaces
+        - { key: 'elasticsearch.hosts', value: '["http://localhost:9200"]' }
+        - { key: 'elasticsearch.username', value: 'elastic' }
+        - { key: 'xpack.fleet.enabled', value: 'true' } # IMPORTANT: Enable the Fleet UI
+      notify: Restart Kibana
+
+    - name: Add 'elastic' password to Kibana keystore
+      ansible.builtin.shell:
+        cmd: "/usr/share/kibana/bin/kibana-keystore add elasticsearch.password -x '{{ siem_password }}'"
+      register: kibana_keystore
+      changed_when: kibana_keystore.rc == 0
+      failed_when: kibana_keystore.rc != 0 and "already exists" not in kibana_keystore.stderr
+      notify: Restart Kibana
+
+    - name: Start and enable Kibana service
+      ansible.builtin.service:
+        name: kibana
+        state: started
+        enabled: yes
+
+    - name: Wait for Kibana to start
+      ansible.builtin.wait_for:
+        port: 5601
+        host: localhost
+        delay: 5
+        timeout: 60
+
+    # --- Install Elastic Agent (for Fleet Server) ---
+    - name: Install the Elastic Agent package
+      ansible.builtin.apt:
+        name: "elastic-agent={{ elastic_version }}"
+        state: present
+
+    # --- Final Message ---
+    - name: Print next steps
+      ansible.builtin.debug:
+        msg:
+          - "-------------------------------------------------------------------"
+          - "SIEM Server Provisioning Complete!"
+          - ""
+          - "Login to Kibana: http://{{ siem_private_ip }}:5601"
+          - "User: elastic"
+          - "Password: {{ siem_password }}"
+          - ""
+          - "--- NEXT STEP: ---"
+          - "Go to the Kibana UI, navigate to 'Management > Fleet',"
+          - "and follow the prompts to set up a new Fleet Server."
+          - "Kibana will give you a command to run on this server to"
+          - "enroll the local Elastic Agent as your new Fleet Server."
+          - "-------------------------------------------------------------------"
+
+  # --- Handlers (run at end if notified) ---
+  handlers:
+    - name: Restart Elasticsearch
+      ansible.builtin.service:
+        name: elasticsearch
+        state: restarted
+
+    - name: Restart Kibana
+      ansible.builtin.service:
+        name: kibana
+        state: restarted
