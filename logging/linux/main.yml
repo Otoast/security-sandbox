@@ -1,0 +1,357 @@
+---
+################################################################################
+# LOGGING SERVER SETUP - ELASTICSEARCH + KIBANA + FLEET SERVER
+################################################################################
+#
+# Purpose:
+#   This playbook sets up a centralized logging and monitoring server for
+#   security sandbox environments. It installs and configures:
+#   - Elasticsearch: Search and analytics engine for log storage
+#   - Kibana: Visualization and management interface
+#   - Fleet Server: Centralized agent management for Elastic Agents
+#
+# Architecture:
+#   Logging Server (This playbook)
+#   ├── Elasticsearch (Port 9200) - Log storage and search
+#   ├── Kibana (Port 5601) - Web UI for visualization
+#   └── Fleet Server (Port 8220) - Agent enrollment and management
+#
+# Prerequisites:
+#   - Linux server (Ubuntu/Debian or RHEL/CentOS)
+#   - Minimum 4GB RAM, 2 CPU cores
+#   - Ports open: 9200 (ES), 5601 (Kibana), 8220 (Fleet)
+#   - SSH access with sudo privileges
+#   - Python 3 installed on target
+#
+# Security Considerations:
+#   ⚠️  This configuration is for sandbox/testing environments only!
+#   - Uses HTTP (not HTTPS) for simplicity
+#   - Exposes services on 0.0.0.0 (all interfaces)
+#   - Uses auto-generated passwords
+#   - For production: Enable TLS, use proper certificates, restrict network access
+#
+# Usage:
+#   1. Update logging_server.ini with your server IP
+#   2. Run: ansible-playbook -i logging_server.ini main.yml
+#   3. Save the displayed enrollment token for target machines
+#   4. Access Kibana at: http://<server-ip>:5601
+#
+# Output:
+#   - Credentials saved to: ../../.fleet_credentials.yml
+#   - This file is used by target machines for automatic enrollment
+#
+# Estimated Runtime: 10-15 minutes
+#
+################################################################################
+
+- name: Logging Machine Setup (Linux) - Elasticsearch + Kibana + Fleet Server
+  hosts: logging_server
+  become: yes
+  vars:
+    # Version Configuration
+    # Note: Keep all three versions in sync for compatibility
+    elasticsearch_version: "9.1.5"
+    kibana_version: "9.1.5"
+    
+    # Installation Directories
+    elasticsearch_dir: "/opt/elasticsearch-{{ elasticsearch_version }}"
+    kibana_dir: "/opt/kibana-{{ kibana_version }}"
+    
+    # Network Configuration
+    # These use the primary IP address of the server
+    # Update if you need to bind to a specific interface
+    fleet_server_host: "https://{{ ansible_default_ipv4.address }}:8220"
+    kibana_host: "http://{{ ansible_default_ipv4.address }}:5601"
+
+  tasks:
+    ############################################################################
+    # PHASE 1: ELASTICSEARCH INSTALLATION
+    ############################################################################
+    # Elasticsearch is the core search and analytics engine that stores all
+    # logs and security events from target machines.
+    ############################################################################
+    
+    - name: Elasticsearch Download and Extract
+      tasks:
+        - name: Obtain Elasticsearch Setup TAR
+          get_url:
+            url: "https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-{{ elasticsearch_version }}-linux-x86_64.tar.gz"
+            dest: "/tmp/elasticsearch.tar.gz"
+          # Downloads ~550MB, may take a few minutes depending on connection
+          
+        - name: Extract Elasticsearch
+          unarchive:
+            src: "/tmp/elasticsearch.tar.gz"
+            dest: "/opt/"
+            remote_src: yes
+          # Extracts to /opt/elasticsearch-<version>/
+
+    - name: Configure Elasticsearch for remote access
+      tasks:
+        - name: Update elasticsearch.yml for network access
+          lineinfile:
+            path: "{{ elasticsearch_dir }}/config/elasticsearch.yml"
+            regexp: "{{ item.regexp }}"
+            line: "{{ item.line }}"
+          loop:
+            # Bind to all interfaces (0.0.0.0) to allow remote connections
+            # ⚠️  In production, bind to specific interface or use firewall rules
+            - { regexp: '^network.host:', line: 'network.host: 0.0.0.0' }
+            - { regexp: '^http.port:', line: 'http.port: 9200' }
+            # Cluster identification
+            - { regexp: '^cluster.name:', line: 'cluster.name: logging-cluster' }
+            - { regexp: '^node.name:', line: 'node.name: logging-node-1' }
+
+    - name: Elasticsearch Service Start and Configuration
+      tasks:
+        - name: Start Elasticsearch in background
+          shell: "nohup {{ elasticsearch_dir }}/bin/elasticsearch > /var/log/elasticsearch.log 2>&1 &"
+          async: 10
+          poll: 0
+          # Starts ES as a background process
+          # Logs written to /var/log/elasticsearch.log
+          
+        - name: Wait for Elasticsearch to start
+          wait_for:
+            port: 9200
+            delay: 15
+            timeout: 300
+          # ES typically takes 30-60 seconds to fully start
+          
+        - name: Password reset for elastic superuser
+          command: "{{ elasticsearch_dir }}/bin/elasticsearch-reset-password -u elastic --batch"
+          register: elastic_password
+          # Generates a new random password for the 'elastic' superuser account
+          # This is the main admin account for Elasticsearch
+          
+        - name: Save elastic password
+          set_fact:
+            elastic_superuser_password: "{{ elastic_password.stdout_lines[-1] }}"
+          # Extracts password from command output for later use
+          
+        - debug:
+            msg: "Elastic superuser password: {{ elastic_superuser_password }}"
+          # Display password - save this for future manual access
+          
+        - name: Wait and Check for Elasticsearch to be available
+          uri:
+            url: "http://localhost:9200"
+            method: GET
+            status_code: 200
+            return_content: yes
+            timeout: 30
+          register: es_check
+          retries: 10
+          delay: 15
+          until: es_check.status == 200
+          # Health check to ensure ES is fully operational
+
+
+    ############################################################################
+    # PHASE 2: KIBANA INSTALLATION
+    ############################################################################
+    # Kibana provides the web interface for visualizing logs, creating
+    # dashboards, and managing the Elastic Stack.
+    ############################################################################
+    
+    - name: Kibana Download and Extract
+      tasks:
+        - name: Obtain Kibana Setup TAR
+          get_url:
+            url: "https://artifacts.elastic.co/downloads/kibana/kibana-{{ kibana_version }}-linux-x86_64.tar.gz"
+            dest: "/tmp/kibana.tar.gz"
+          # Downloads ~300MB
+          
+        - name: Extract Kibana
+          unarchive:
+            src: "/tmp/kibana.tar.gz"
+            dest: "/opt/"
+            remote_src: yes
+          # Extracts to /opt/kibana-<version>/
+
+    - name: Configure Kibana for remote access
+      tasks:
+        - name: Update kibana.yml for network access
+          lineinfile:
+            path: "{{ kibana_dir }}/config/kibana.yml"
+            regexp: "{{ item.regexp }}"
+            line: "{{ item.line }}"
+          loop:
+            # Bind to all interfaces to allow remote web access
+            - { regexp: '^server.host:', line: 'server.host: "0.0.0.0"' }
+            - { regexp: '^server.port:', line: 'server.port: 5601' }
+          # Kibana will be accessible at http://<server-ip>:5601
+
+    - name: Kibana Service start and Configuration
+      tasks:
+        - name: Get enrollment token for Kibana
+          command: "{{ elasticsearch_dir }}/bin/elasticsearch-create-enrollment-token -s kibana"
+          register: enrollment_token
+          # Generates a secure token to connect Kibana to Elasticsearch
+          # This token includes connection details and certificates
+          
+        - name: Configure kibana with enrollment token
+          command: "{{ kibana_dir }}/bin/kibana-setup --enrollment-token {{ enrollment_token.stdout }}"
+          # Automatically configures Kibana to connect to Elasticsearch
+          # Sets up security and communication certificates
+          
+        - name: Start Kibana in background
+          shell: "nohup {{ kibana_dir }}/bin/kibana > /var/log/kibana.log 2>&1 &"
+          async: 10
+          poll: 0
+          # Starts Kibana as a background process
+          # Logs written to /var/log/kibana.log
+          
+        - name: Wait for Kibana to start
+          wait_for:
+            port: 5601
+            delay: 15
+            timeout: 300
+          # Kibana typically takes 60-90 seconds to start
+          # It needs to connect to ES and initialize plugins
+    ############################################################################
+    # PHASE 3: FLEET SERVER SETUP
+    ############################################################################
+    # Fleet Server manages Elastic Agents on target machines:
+    # - Provides enrollment endpoint for new agents
+    # - Distributes policies and configurations
+    # - Monitors agent health and status
+    # - Coordinates data collection across all agents
+    ############################################################################
+    
+    - name: Fleet Server Setup
+      tasks:
+        - name: Create service token for Fleet Server
+          uri:
+            url: "http://localhost:9200/_security/service/elastic/fleet-server/credential/token/fleet-token"
+            method: POST
+            user: elastic
+            password: "{{ elastic_superuser_password }}"
+            force_basic_auth: yes
+            status_code: 200
+            return_content: yes
+          register: fleet_service_token
+          # Creates a service account token for Fleet Server to authenticate with ES
+          # This is more secure than using the elastic superuser password
+        
+        - name: Download Fleet Server (Elastic Agent)
+          get_url:
+            url: "https://artifacts.elastic.co/downloads/beats/elastic-agent/elastic-agent-{{ elasticsearch_version }}-linux-x86_64.tar.gz"
+            dest: "/tmp/elastic-agent.tar.gz"
+          # Fleet Server is actually an Elastic Agent running in "server mode"
+          # Downloads ~200MB
+        
+        - name: Extract Fleet Server
+          unarchive:
+            src: "/tmp/elastic-agent.tar.gz"
+            dest: "/opt/"
+            remote_src: yes
+          # Extracts to /opt/elastic-agent-<version>-linux-x86_64/
+        
+        - name: Install and start Fleet Server
+          shell: |
+            cd /opt/elastic-agent-{{ elasticsearch_version }}-linux-x86_64
+            ./elastic-agent install \
+              --fleet-server-es=http://localhost:9200 \
+              --fleet-server-service-token={{ fleet_service_token.json.token.value }} \
+              --fleet-server-policy=fleet-server-policy \
+              --fleet-server-es-ca-trusted-fingerprint=$(openssl x509 -fingerprint -sha256 -noout -in {{ elasticsearch_dir }}/config/certs/http_ca.crt | cut -d'=' -f2 | tr -d ':')
+          args:
+            creates: /opt/Elastic/Agent/elastic-agent
+          # Installs Fleet Server as a system service
+          # --fleet-server-es: Elasticsearch connection
+          # --fleet-server-service-token: Authentication token
+          # --fleet-server-policy: Default policy for Fleet Server itself
+          # --fleet-server-es-ca-trusted-fingerprint: Certificate verification
+        
+        - name: Get Fleet enrollment token for agents
+          uri:
+            url: "http://localhost:5601/api/fleet/enrollment_tokens"
+            method: GET
+            user: elastic
+            password: "{{ elastic_superuser_password }}"
+            force_basic_auth: yes
+            headers:
+              kbn-xsrf: "true"
+            status_code: 200
+            return_content: yes
+          register: fleet_enrollment_tokens
+          # Retrieves the enrollment token from Kibana's Fleet API
+          # Target machines will use this token to enroll their agents
+        
+        - name: Save Fleet enrollment token to local file
+          local_action:
+            module: copy
+            content: |
+              # Auto-generated Fleet Server credentials
+              # Created: {{ ansible_date_time.iso8601 }}
+              # Server: {{ ansible_default_ipv4.address }}
+              
+              fleet_server_url: "https://{{ ansible_default_ipv4.address }}:8220"
+              fleet_enrollment_token: "{{ fleet_enrollment_tokens.json[0].api_key }}"
+              elastic_password: "{{ elastic_superuser_password }}"
+              elasticsearch_url: "http://{{ ansible_default_ipv4.address }}:9200"
+              kibana_url: "http://{{ ansible_default_ipv4.address }}:5601"
+            dest: "{{ playbook_dir }}/../../.fleet_credentials.yml"
+          become: no
+          # Saves credentials to local file on the Ansible control machine
+          # This file is automatically read by target machine playbooks
+          # Path: security-sandbox/.fleet_credentials.yml
+        
+        - name: Display Fleet enrollment information
+          debug:
+            msg: |
+              ============================================
+              FLEET SERVER SETUP COMPLETE
+              ============================================
+              Elasticsearch: http://{{ ansible_default_ipv4.address }}:9200
+              Kibana: http://{{ ansible_default_ipv4.address }}:5601
+              Fleet Server: {{ fleet_server_host }}
+              
+              Elastic Username: elastic
+              Elastic Password: {{ elastic_superuser_password }}
+              
+              Fleet Enrollment Token: {{ fleet_enrollment_tokens.json[0].api_key }}
+              
+              ✅ Credentials saved to: {{ playbook_dir }}/../../.fleet_credentials.yml
+              
+              Target machines will automatically use these credentials.
+              ============================================
+
+################################################################################
+# POST-DEPLOYMENT NOTES
+################################################################################
+# 
+# What's Running:
+# ├── Elasticsearch: http://<server-ip>:9200
+# │   └── Log storage and search engine
+# ├── Kibana: http://<server-ip>:5601
+# │   └── Web UI (login with elastic/<password>)
+# └── Fleet Server: https://<server-ip>:8220
+#     └── Agent enrollment and management
+#
+# Next Steps:
+# 1. Access Kibana at http://<server-ip>:5601
+# 2. Login with username: elastic, password: <displayed above>
+# 3. Go to Management → Fleet to see Fleet Server status
+# 4. Run target machine playbook to enroll agents
+#
+# Security Groups / Firewall Rules Required:
+# - Port 9200 (Elasticsearch) - Internal only, or restrict to trusted IPs
+# - Port 5601 (Kibana) - Allow from your management IPs
+# - Port 8220 (Fleet Server) - Allow from target machine IPs only
+# - Port 22 (SSH) - For Ansible management
+#
+# Production Hardening TODO:
+# ⚠️  This is a sandbox configuration - for production:
+# - Enable HTTPS with proper certificates
+# - Restrict network.host to specific interfaces
+# - Use firewall rules to limit access
+# - Implement role-based access control (RBAC)
+# - Enable audit logging
+# - Use systemd services instead of nohup
+# - Set up proper log rotation
+# - Configure backups for Elasticsearch data
+# - Use dedicated system users (not root)
+#
+################################################################################

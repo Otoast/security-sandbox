@@ -1,0 +1,207 @@
+---
+################################################################################
+# MASTER DEPLOYMENT PLAYBOOK
+################################################################################
+#
+# Purpose:
+#   Orchestrates the complete deployment of a security sandbox environment:
+#   1. Deploys logging server (Elasticsearch + Kibana + Fleet Server)
+#   2. Automatically captures Fleet enrollment credentials
+#   3. Deploys Elastic Agents to all target machines
+#   4. Enrolls agents with Fleet Server for centralized management
+#
+# Architecture Deployed:
+#   
+#   ┌─────────────────────────────────────────────┐
+#   │       LOGGING SERVER (Deployed First)       │
+#   │  ┌──────────────────────────────────────┐   │
+#   │  │ Elasticsearch (Port 9200)            │   │
+#   │  │ - Log storage and search engine      │   │
+#   │  └──────────────────────────────────────┘   │
+#   │  ┌──────────────────────────────────────┐   │
+#   │  │ Kibana (Port 5601)                   │   │
+#   │  │ - Web UI for visualization           │   │
+#   │  └──────────────────────────────────────┘   │
+#   │  ┌──────────────────────────────────────┐   │
+#   │  │ Fleet Server (Port 8220)             │   │
+#   │  │ - Agent enrollment & management      │   │
+#   │  └──────────────────────────────────────┘   │
+#   └─────────────────────────────────────────────┘
+#                       ↓
+#              Enrollment Token Saved
+#              (.fleet_credentials.yml)
+#                       ↓
+#   ┌─────────────────────────────────────────────┐
+#   │    TARGET MACHINES (Deployed Second)        │
+#   │  ┌──────────────────────────────────────┐   │
+#   │  │ Target 1: Elastic Agent              │   │
+#   │  └──────────────────────────────────────┘   │
+#   │  ┌──────────────────────────────────────┐   │
+#   │  │ Target 2: Elastic Agent              │   │
+#   │  └──────────────────────────────────────┘   │
+#   │  ┌──────────────────────────────────────┐   │
+#   │  │ Target N: Elastic Agent              │   │
+#   │  └──────────────────────────────────────┘   │
+#   └─────────────────────────────────────────────┘
+#
+# Prerequisites:
+#   1. Ansible installed on control machine
+#   2. SSH access to all servers (logging + targets)
+#   3. Sudo privileges on all servers
+#   4. Python 3 installed on all servers
+#   5. Inventory files configured with correct IPs
+#
+# Required Files:
+#   ├── logging/linux/logging_server.ini (Logging server inventory)
+#   ├── target/linux/target_linux.ini (Target machines inventory)
+#   ├── logging/linux/main.yml (Logging server playbook)
+#   └── target/linux/main.yml (Target machine playbook)
+#
+# Setup Steps:
+#   1. Configure logging/linux/logging_server.ini:
+#      [logging_server]
+#      10.0.1.50
+#
+#   2. Configure target/linux/target_linux.ini:
+#      [target_linux]
+#      10.0.2.10
+#      10.0.2.11
+#      10.0.2.12
+#
+#   3. Ensure SSH keys are configured:
+#      ssh-copy-id -i ~/.ssh/your-key.pem ubuntu@<server-ip>
+#
+#   4. Run this playbook:
+#      ansible-playbook -i logging/linux/logging_server.ini \
+#                       -i target/linux/target_linux.ini \
+#                       deploy_all.yml
+#
+# What Happens:
+#   Phase 1: Logging Server Deployment (10-15 minutes)
+#   ├── Install Elasticsearch
+#   ├── Install Kibana
+#   ├── Install Fleet Server
+#   ├── Generate enrollment token
+#   └── Save credentials to .fleet_credentials.yml
+#
+#   Phase 2: Target Machine Deployment (3-5 minutes per machine)
+#   ├── Read credentials from .fleet_credentials.yml
+#   ├── Install Elastic Agent
+#   ├── Enroll with Fleet Server
+#   └── Start data collection
+#
+# Post-Deployment Access:
+#   - Kibana UI: http://<logging-server-ip>:5601
+#   - Username: elastic
+#   - Password: Displayed in output or saved in .fleet_credentials.yml
+#
+# Verification:
+#   1. Check Kibana → Management → Fleet → Agents
+#      - All target machines should appear as "Healthy"
+#   2. Check Kibana → Discover
+#      - Logs from all target machines should be visible
+#
+# Troubleshooting:
+#   - Logging server deployment failed?
+#     → Check: Sufficient resources (4GB RAM, 2 CPUs)
+#     → Check: Ports 9200, 5601, 8220 are not in use
+#     → Check: Server can reach internet for downloads
+#
+#   - Target machines not enrolling?
+#     → Check: .fleet_credentials.yml file exists
+#     → Check: Target can reach logging server on port 8220
+#     → Check: Security groups/firewall rules
+#     → Verify: Fleet Server is running (systemctl status elastic-agent)
+#
+# Estimated Total Runtime:
+#   - Logging Server: 10-15 minutes
+#   - Each Target: 3-5 minutes (runs in parallel)
+#   - Total: ~15-20 minutes for typical setup
+#
+# Network Requirements:
+#   Logging Server → Internet:
+#   - Download Elastic packages (~1GB total)
+#   
+#   Target Machines → Internet:
+#   - Download Elastic Agent (~200MB each)
+#   
+#   Target Machines → Logging Server:
+#   - Port 8220: Fleet Server enrollment and management
+#   - Port 9200: (Optional) Direct Elasticsearch access
+#
+# Resource Requirements:
+#   Logging Server:
+#   - 4GB RAM minimum (8GB recommended)
+#   - 2 CPU cores minimum (4 cores recommended)
+#   - 20GB disk space minimum (50GB+ for production)
+#   
+#   Target Machines:
+#   - 512MB RAM minimum (1GB recommended)
+#   - 1 CPU core minimum
+#   - 5GB disk space for agent and logs
+#
+################################################################################
+
+# Master Playbook - Deploys complete security sandbox
+# This playbook orchestrates the deployment of both logging server and target machines
+
+- name: Deploy Logging Server with Fleet
+  import_playbook: logging/linux/main.yml
+  # Imports and executes the logging server playbook
+  # Creates: Elasticsearch, Kibana, Fleet Server
+  # Generates: .fleet_credentials.yml with enrollment token
+
+- name: Deploy Target Machines with Elastic Agent
+  import_playbook: target/linux/main.yml
+  # Imports and executes the target machine playbook
+  # Uses: .fleet_credentials.yml from previous step
+  # Installs: Elastic Agent on all target machines
+  # Enrolls: All agents with Fleet Server
+
+################################################################################
+# USAGE EXAMPLES
+################################################################################
+#
+# Basic Deployment:
+#   ansible-playbook -i logging/linux/logging_server.ini \
+#                    -i target/linux/target_linux.ini \
+#                    deploy_all.yml
+#
+# With Verbose Output (for debugging):
+#   ansible-playbook -vvv \
+#                    -i logging/linux/logging_server.ini \
+#                    -i target/linux/target_linux.ini \
+#                    deploy_all.yml
+#
+# Check Mode (dry-run, no changes):
+#   ansible-playbook --check \
+#                    -i logging/linux/logging_server.ini \
+#                    -i target/linux/target_linux.ini \
+#                    deploy_all.yml
+#
+# Deploy Only Logging Server:
+#   ansible-playbook -i logging/linux/logging_server.ini \
+#                    logging/linux/main.yml
+#
+# Deploy Only Target Machines (logging server must exist):
+#   ansible-playbook -i target/linux/target_linux.ini \
+#                    target/linux/main.yml
+#
+# Deploy to Specific Targets:
+#   ansible-playbook -i target/linux/target_linux.ini \
+#                    --limit "10.0.2.10,10.0.2.11" \
+#                    target/linux/main.yml
+#
+################################################################################
+# BENEFITS OF THIS APPROACH
+################################################################################
+#
+# ✅ Fully Automated: No manual token copying required
+# ✅ Idempotent: Safe to run multiple times
+# ✅ Scalable: Add more targets by updating inventory
+# ✅ Centralized: Single command deploys entire environment
+# ✅ Versioned: All configurations in version control
+# ✅ Auditable: Ansible logs all changes made
+# ✅ Reproducible: Same result every time
+#
+################################################################################
