@@ -1,0 +1,13 @@
+ssh_keys/*
+!ssh_keys/.gitkeep
+.env
+env
+
+.terraform/
+*.tfstate
+*.tfstate.*
+
+*.tfvars
+*.tfvars.json
+
+
