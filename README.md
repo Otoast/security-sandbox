@@ -1,1 +1,0 @@
-Repo for holding the project code. File structure is subject to change. Likely will use a .sh script to properly orchestrate everything

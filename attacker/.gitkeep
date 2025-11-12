@@ -1,0 +1,11 @@
+# SSH Keys - NEVER commit these
+keys/
+*.pem
+*.key
+
+# Ansible retry files
+*.retry
+
+# Python
+__pycache__/
+*.pyc
