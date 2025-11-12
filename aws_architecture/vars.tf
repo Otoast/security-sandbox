@@ -4,8 +4,13 @@ locals {
 
 locals {
   pub_key_dir  = "../${local.config.ssh_keys_dir}"
-  pub_key_info = local.config.user_to_attacker_ssh_key
-  pub_key_path = "${local.pub_key_dir}/${local.pub_key_info.name}.pub"
+  
+  user_attacker_key_info = local.config.user_to_attacker_ssh_key
+  user_attacker_key_path = "${local.pub_key_dir}/${local.user_attacker_key_info.name}.pub"
+
+  internal_lab_key_info = local.config.internal_lab_ssh_key
+  internal_lab_key_path = "${local.pub_key_dir}/${local.internal_lab_key_info.name}.pub"
+
   selected_ami = lookup({
     linux   = data.aws_ami.linux.id,
     windows = data.aws_ami.windows.id,
@@ -21,8 +26,13 @@ variable "availability_zone" {
 
 // Key-pair for attacker machine
 resource "aws_key_pair" "user_attacker_key" {
-  key_name   = local.pub_key_info.name
-  public_key = file(local.pub_key_path)
+  key_name   = local.user_attacker_key_info.name
+  public_key = file(local.user_attacker_key_path)
+}
+
+resource "aws_key_pair" "internal_lab_key" {
+  key_name   = local.internal_lab_key_info.name
+  public_key = file(local.internal_lab_key_path)
 }
 
 data "aws_ami" "linux" {

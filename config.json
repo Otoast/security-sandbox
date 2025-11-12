@@ -1,12 +1,20 @@
 {
-    "ssh_client_ip" : "165.91.13.66",
-    "target_machine_os": "linux",
-
-    "ssh_keys_dir" : "./ssh_keys",
-    "user_to_attacker_ssh_key" : {
-        "name" : "user_to_attacker_key",
-        "type" : "ed25519",
-        "passphrase" : "",
-        "comment" : "Locally generated key pair to attacker instance"
-    }
+  "ssh_client_ip": "75.108.161.217",
+  "target_machine_os": "linux",
+  
+  
+  
+  "ssh_keys_dir": "./ssh_keys",
+  "user_to_attacker_ssh_key": {
+    "name": "user_to_attacker_key",
+    "type": "ed25519",
+    "passphrase": "",
+    "comment": "Locally generated key pair to attacker instance"
+  },
+  "internal_lab_ssh_key": {
+    "name": "internal_lab_key",
+    "type": "ed25519",
+    "passphrase": "",
+    "comment": "Locally generated key pair to internal lab instances"
+  }
 }

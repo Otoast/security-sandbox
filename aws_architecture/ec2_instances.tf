@@ -19,6 +19,7 @@ resource "aws_instance" "logging_machine" {
     instance_type = "t3.micro"
     private_ip = "10.0.1.10"
     security_groups = [ aws_security_group.logging_machine_sg.id ]
+    key_name = aws_key_pair.internal_lab_key.key_name
 
     subnet_id = aws_subnet.lab_private_subnet.id
     tags = {
@@ -33,6 +34,7 @@ resource "aws_instance" "target_machine" {
     instance_type = "t3.micro"
     private_ip = "10.0.0.10"
     security_groups = [ aws_security_group.target_machine_sg.id ]
+    key_name = aws_key_pair.internal_lab_key.key_name
 
     subnet_id = aws_subnet.lab_private_subnet.id
     host_id   = local.selected_ami == data.aws_ami.macos.id ? aws_ec2_host.mac_host[0].id : null
