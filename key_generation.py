@@ -59,23 +59,24 @@ def main():
     with open("config.json") as f:
         config = json.load(f)
 
-    ssh_key_details = config["user_to_attacker_ssh_key"]
-    ssh_key_dir = Path(config["ssh_keys_dir"]).expanduser().resolve()
-    ssh_key_dir.mkdir(parents=True, exist_ok=True)
+    for key_config_name in ["user_to_attacker_ssh_key", "internal_lab_ssh_key"]:
+        ssh_key_details = config[key_config_name]
+        ssh_key_dir = Path(config["ssh_keys_dir"]).expanduser().resolve()
+        ssh_key_dir.mkdir(parents=True, exist_ok=True)
 
-    key_name = ssh_key_details["name"]
-    key_passphrase = ssh_key_details.get("passphrase", "")
-    key_type = ssh_key_details.get("type", "ed25519")
-    comment = ssh_key_details.get("comment", "")
+        key_name = ssh_key_details["name"]
+        key_passphrase = ssh_key_details.get("passphrase", "")
+        key_type = ssh_key_details.get("type", "ed25519")
+        comment = ssh_key_details.get("comment", "")
 
-    dest = ssh_key_dir / key_name
+        dest = ssh_key_dir / key_name
 
-    if (dest.exists() or (dest.with_suffix(dest.suffix + ".pub").exists())):
-        raise FileExistsError(f"Key already exists: {dest} or {dest}.pub")
+        if (dest.exists() or (dest.with_suffix(dest.suffix + ".pub").exists())):
+            print(f"Warning: Key already exists: {dest} or {dest}.pub. Skipping generation.")
+            continue
 
-    print(f"🔑 Generating {key_type} keypair at: {dest}")
-    generate_with_cryptography(dest, key_type, key_passphrase, comment)
-    print("✅ Done. Keys saved under:", ssh_key_dir)
+        print(f"🔑 Generating {key_type} keypair at: {dest}")
+        generate_with_cryptography(dest, key_type, key_passphrase, comment)
 
 
 if __name__ == "__main__":
