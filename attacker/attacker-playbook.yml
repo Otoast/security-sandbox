@@ -4,8 +4,8 @@
   become: yes
   vars:
     atomic_red_team_path: "/opt/AtomicRedTeam"
-    project_repo_url: "https://github.com/YOUR_ORG/elastic-security-lab.git"
-    project_repo_path: "/opt/elastic-lab"
+    project_repo_url: "https://github.com/Otoast/security-sandbox.git"
+    project_repo_path: "/opt/security-sandbox"  
     
   tasks:
     - name: Update apt cache (Ubuntu/Debian)
@@ -187,7 +187,7 @@
 
     - name: Create lab configuration file
       copy:
-        dest: "/opt/elastic-lab/lab-config.yaml"
+        dest: "/opt/security-sandbox/lab-config.yaml" 
         content: |
           lab_name: "Elastic Security Sandbox"
           target_ip: "{{ target_private_ip | default('10.0.2.10') }}"
