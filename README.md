@@ -1,6 +1,6 @@
 Requirements:
 - Python
-    - ssh-keygen.py requires cryptography module to generate keys. Running the file automatically installs the dependency
+    - key_generation.py requires cryptography module to generate keys. Running the file automatically installs the dependency
 - Terraform
 - Ansible
 
