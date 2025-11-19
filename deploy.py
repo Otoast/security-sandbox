@@ -102,7 +102,7 @@ def main():
     parser.add_argument("--apply", action="store_true", help="Apply (deploy) Terraform configuration")
     parser.add_argument("--destroy", action="store_true", help="Destroy all Terraform-managed resources")
     parser.add_argument("--reset", action="store_true", help="Destroy and redeploy all EC2 instances")
-    parser.add_argument("--update-ip", action="store_true", help="Query public IP and update config.json (no Terraform)")
+    parser.add_argument("--update-ip", nargs='?', const='auto', metavar='IP', help="Update SSH client IP in config.json and attacker security group via targeted Terraform apply. Optionally provide IP address (default: auto-detect)")
     parser.add_argument("--target", choices=['macos', 'windows', 'linux'], help="Set target_machine_os in config.json (works with --apply)")
     parser.add_argument("--no-ansible", action="store_true", help="Skip running the Ansible playbook")
 
@@ -118,15 +118,59 @@ def main():
     load_env(env_path)
 
     if args.update_ip:
-        ip = get_public_ip()
-        if ip:
-            update_config(DEFAULT_CONFIG_PATH, {"ssh_client_ip": ip})
-            print("--update-ip completed; exiting.")
-            return
+        # Determine which IP to use
+        if args.update_ip == 'auto':
+            # Auto-detect IP
+            ip = get_public_ip()
+            if not ip:
+                print("Public IP lookup failed; cannot proceed with --update-ip.")
+                return
+            print(f"Auto-detected public IP: {ip}")
         else:
-            print("Public IP lookup failed; nothing was changed.")
+            # User provided an IP
+            ip = args.update_ip
+            print(f"Using provided IP: {ip}")
+            
+            # Query web services to compare
+            detected_ip = get_public_ip()
+            if detected_ip and detected_ip != ip:
+                print(f"\n⚠️  WARNING: Provided IP ({ip}) differs from auto-detected IP ({detected_ip})")
+                print("    Continuing with provided IP...\n")
+            elif detected_ip:
+                print(f"✓ Provided IP matches auto-detected IP")
+        
+        # Update config.json
+        update_config(DEFAULT_CONFIG_PATH, {"ssh_client_ip": ip})
+        
+        # Run targeted Terraform apply to update only the security group
+        terraform_ok = ensure_installed(
+            "terraform",
+            "Please install Terraform to update the security group."
+        )
+        if not terraform_ok:
+            print("Terraform is required for security group update. Exiting.")
             return
+        
+        aws_arch_dir = Path(__file__).parent / "aws_architecture"
+        if not aws_arch_dir.exists():
+            print(f"Terraform directory not found: {aws_arch_dir}")
+            return
+        
+        print("\n--> Running targeted Terraform apply to update attacker_machine_sg only...")
+        print("    This will update the security group without redeploying instances.\n")
+        
+        run_command(
+            ["terraform", "apply", "-target=aws_security_group.attacker_machine_sg", "-auto-approve"],
+            cwd=aws_arch_dir
+        )
+        
+        print("\n✓ Security group updated successfully!")
+        print("  Config.json updated with new IP")
+        print("  Attacker security group SSH rule updated via Terraform")
+        print("  No instance redeployment required")
+        return
 
+    os.environ["TF_VAR_availability_zone"] = os.environ.get("AWS_DEFAULT_REGION", "us-east-1a")
 
     terraform_ok = ensure_installed(
         "terraform",
@@ -172,7 +216,7 @@ def main():
             check=True
         )
         print(f"Terraform Output:\n{tf_output.stdout}")
-        print("Done")
+
         if not args.no_ansible:
             ansible_ok = ensure_installed(
                 "ansible-playbook",
