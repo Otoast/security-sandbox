@@ -1,6 +1,5 @@
 ssh_keys/*
 !ssh_keys/.gitkeep
-.env
 env
 
 .terraform/
