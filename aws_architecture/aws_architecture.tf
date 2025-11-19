@@ -1,15 +1,16 @@
 resource "aws_vpc" "lab_vpc" {
     cidr_block = "10.0.0.0/16"
-
+    
     tags = {
         Name = "lab_vpc"
-    }   
+    }  
 }
 
 // Subnets
 resource "aws_subnet" "lab_public_subnet" {
     vpc_id = aws_vpc.lab_vpc.id
     cidr_block = "10.0.2.0/23"
+    availability_zone = local.config.availability_zone
     tags = {
       Name = "lab_public_subnet"
     }
@@ -17,6 +18,7 @@ resource "aws_subnet" "lab_public_subnet" {
 
 resource "aws_subnet" "lab_private_subnet" {
     vpc_id = aws_vpc.lab_vpc.id
+    availability_zone = local.config.availability_zone
     cidr_block = "10.0.0.0/23"
     tags = {
       Name = "lab_private_subnet"
@@ -34,18 +36,14 @@ resource "aws_internet_gateway" "lab_public_igw" {
 // Route Tables
 resource "aws_route_table" "lab_public_route_table" {
     vpc_id = aws_vpc.lab_vpc.id
-
-
     route {
         cidr_block = "0.0.0.0/0"
         gateway_id = aws_internet_gateway.lab_public_igw.id
     }
-
     route {
         cidr_block = "10.0.0.0/16"
         gateway_id = "local"
     }
-
     tags = {
         Name = "lab_public_route_table"
     }
@@ -53,7 +51,6 @@ resource "aws_route_table" "lab_public_route_table" {
 
 resource "aws_route_table" "lab_private_route_table" {
     vpc_id = aws_vpc.lab_vpc.id
-
     route {
         cidr_block = "10.0.0.0/16"
         gateway_id = "local"
