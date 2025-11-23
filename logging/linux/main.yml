@@ -419,6 +419,21 @@
         status_code: 200
         return_content: yes
       register: fleet_service_token
+
+    - name: Copy Elastic Agent TAR from controller (offline)
+      copy:
+        src: "{{ local_files_dir }}/elastic-agent-{{ elastic_version }}-linux-x86_64.tar.gz"
+        dest: "/tmp/elastic-agent.tar.gz"
+        mode: '0644'
+      # Copies pre-downloaded Elastic Agent from the attacker/controller to the control host
+
+    - name: Extract Elastic Agent
+      unarchive:
+        src: "/tmp/elastic-agent.tar.gz"
+        dest: "/opt/"
+        remote_src: yes
+        creates: "/opt/elastic-agent-{{ elastic_version }}-linux-x86_64"
+      # Idempotent: will skip extraction if the directory already exists
     
     - name: Install Fleet Server
       shell: |

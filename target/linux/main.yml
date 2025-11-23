@@ -59,122 +59,52 @@
   hosts: target_linux
   become: yes
   vars:
-    # Version Configuration
-    # Note: Should match the version on the logging server
-    elastic_agent_version: "9.1.5" # Can update with any version if needed (watch for compatibility!)
-    
-    # Security Configuration
-    # Set to true to skip TLS certificate verification
-    # ⚠️  Not recommended for production, but useful for testing with self-signed certs
+    elastic_agent_version: "9.1.5"
     insecure: true
-  
+
   vars_files:
-    # Automatically loads Fleet credentials from logging server deployment
-    # File path is relative to this playbook's location
-    - ../../.fleet_credentials.yml
+    - ../../logging/linux/.fleet_credentials.yml
 
   tasks:
-    ############################################################################
-    # PHASE 1: CREDENTIAL VERIFICATION
-    ############################################################################
-    # Ensures that the logging server has been deployed and credentials exist
-    ############################################################################
-    
     - name: Verify Fleet credentials are loaded
       assert:
         that:
-          - fleet_server_url is defined
+          - fleet_url is defined
           - fleet_enrollment_token is defined
         fail_msg: |
-          ❌ Fleet credentials not found! 
-          
-          The file ../../.fleet_credentials.yml does not exist or is invalid.
-          
-          You must run the logging server playbook first:
-          cd ../../logging/linux
-          ansible-playbook -i logging_server.ini main.yml
-          
-          This will generate the .fleet_credentials.yml file needed for target enrollment.
-          
-        success_msg: "✅ Fleet credentials loaded successfully from .fleet_credentials.yml"
-      # This check prevents deployment failures if logging server isn't set up
+          Fleet credentials not found! Ensure logging server playbook has run and ../../logging/linux/.fleet_credentials.yml exists.
 
-    ############################################################################
-    # PHASE 2: ELASTIC AGENT INSTALLATION
-    ############################################################################
-    # Downloads and extracts the Elastic Agent software
-    ############################################################################
-    
-    - name: Elastic Agent Download and Extract
-      tasks:
-        - name: Obtain Elastic Agent Setup TAR
-          get_url:
-            url: "https://artifacts.elastic.co/downloads/beats/elastic-agent/elastic-agent-{{ elastic_agent_version }}-linux-x86_64.tar.gz"
-            dest: "/tmp/elastic-agent.tar.gz"
-          # Downloads ~200MB from Elastic's official repository
-          
-        - name: Extract Elastic Agent
-          unarchive:
-            src: "/tmp/elastic-agent.tar.gz"
-            dest: "/opt/"
-            remote_src: yes
-          # Extracts to /opt/elastic-agent-<version>-linux-x86_64/
+    - name: Copy Elastic Agent TAR from controller (offline)
+      copy:
+        src: "{{ playbook_dir }}/../../downloads/elastic-agent-{{ elastic_agent_version }}-linux-x86_64.tar.gz"
+        dest: "/tmp/elastic-agent.tar.gz"
+        mode: '0644'
 
-    ############################################################################
-    # PHASE 3: FLEET ENROLLMENT
-    ############################################################################
-    # Installs agent as a system service and enrolls it with Fleet Server
-    ############################################################################
-    
-    - name: Elastic Agent Install and Enroll to Fleet Server
-      tasks:
-        - name: Install Elastic Agent with Fleet enrollment
-          shell: |
-            cd /opt/elastic-agent-{{ elastic_agent_version }}-linux-x86_64
-            ./elastic-agent install \
-              --url={{ fleet_server_url }} \
-              --enrollment-token={{ fleet_enrollment_token }} \
-              {% if insecure %}--insecure{% endif %}
-          args:
-            creates: /opt/Elastic/Agent/elastic-agent
-          register: agent_install
-          # Installation process:
-          # 1. Installs agent as systemd service
-          # 2. Connects to Fleet Server at specified URL
-          # 3. Authenticates using enrollment token
-          # 4. Downloads policy from Fleet Server
-          # 5. Starts data collection based on policy
-          # 6. Begins sending data to Elasticsearch
-          #
-          # The --insecure flag skips TLS verification (useful for self-signed certs)
-          # In production, remove this flag and use proper certificates
+    - name: Extract Elastic Agent
+      unarchive:
+        src: "/tmp/elastic-agent.tar.gz"
+        dest: "/opt/"
+        remote_src: yes
 
-        - name: Check Elastic Agent status
-          command: elastic-agent status
-          register: agent_status
-          ignore_errors: yes
-          # Retrieves current status of the agent
-          # Shows: connection state, policy info, component health
+    - name: Install Elastic Agent and enroll to Fleet
+      shell: |
+        cd /opt/elastic-agent-{{ elastic_agent_version }}-linux-x86_64
+        ./elastic-agent install \
+          --url={{ fleet_url }} \
+          --enrollment-token={{ fleet_enrollment_token }} \
+          {% if insecure %}--insecure{% endif %} \
+          --non-interactive
+      args:
+        creates: /opt/Elastic/Agent/elastic-agent
 
-        - debug:
-            msg: |
-              ============================================
-              ELASTIC AGENT INSTALLATION COMPLETE
-              ============================================
-              Fleet Server: {{ fleet_server_url }}
-              Enrollment: Automatic (token from logging server)
-              
-              Agent Status:
-              {{ agent_status.stdout }}
-              
-              ✅ Agent is now collecting data and sending to Elasticsearch
-              
-              View this agent in Kibana:
-              {{ kibana_url }}/app/fleet/agents
-              
-              View collected logs:
-              {{ kibana_url }}/app/discover
-              ============================================
+    - name: Check Elastic Agent status
+      shell: /opt/Elastic/Agent/elastic-agent status || true
+      register: agent_status
+      ignore_errors: yes
+
+    - name: Show agent install output
+      debug:
+        msg: "Elastic Agent status:\n{{ agent_status.stdout }}\nView agents in Kibana: {{ kibana_host }}/app/fleet/agents"
 
 ################################################################################
 # POST-DEPLOYMENT NOTES
