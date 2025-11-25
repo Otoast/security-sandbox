@@ -10,6 +10,7 @@
   "availability_zone": "us-east-1a",
 
   "ssh_keys_dir": "./ssh_keys",
+  
   "user_to_attacker_ssh_key": {
     "name": "user_to_attacker_key",
     "type": "ed25519",
