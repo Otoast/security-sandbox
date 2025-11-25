@@ -1,0 +1,50 @@
+---
+- name: Target Machine Setup (macOS) - Elastic Agent Only
+  hosts: target_macos
+  become: yes
+  vars:
+    elastic_agent_version: "9.1.5"
+    insecure: true
+
+  vars_files:
+    - ../../logging/linux/.fleet_credentials.yml
+
+  tasks:
+    - name: Verify Fleet credentials are loaded
+      assert:
+        that:
+          - fleet_url is defined
+          - fleet_enrollment_token is defined
+        fail_msg: |
+          Fleet credentials not found. Ensure logging server deployed and ../../logging/linux/.fleet_credentials.yml exists.
+
+    - name: Copy Elastic Agent tarball from controller (offline)
+      copy:
+        src: "{{ playbook_dir }}/../../downloads/elastic-agent-{{ elastic_agent_version }}-darwin-x86_64.tar.gz"
+        dest: "/tmp/elastic-agent.tar.gz"
+        mode: '0644'
+
+    - name: Extract Elastic Agent
+      unarchive:
+        src: "/tmp/elastic-agent.tar.gz"
+        dest: "/opt/"
+        remote_src: yes
+
+    - name: Install Elastic Agent and enroll to Fleet
+      shell: |
+        cd /opt/elastic-agent-{{ elastic_agent_version }}-darwin-x86_64
+        ./elastic-agent install \
+          --url={{ fleet_url }} \
+          --enrollment-token={{ fleet_enrollment_token }} \
+          {% if insecure %}--insecure{% endif %} \
+          --non-interactive
+      args:
+        creates: /Library/Elastic/Agent/elastic-agent
+
+    - name: Check Elastic Agent status
+      shell: /Library/Elastic/Agent/elastic-agent status || true
+      register: agent_status
+      ignore_errors: yes
+
+    - debug:
+        msg: "Elastic Agent install output: {{ agent_status.stdout }}\nView agents in Kibana: {{ kibana_host }}/app/fleet/agents"

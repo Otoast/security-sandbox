@@ -1,116 +1,47 @@
-- name: Target Machine Setup (Windows)
+- name: Target Machine Setup (Windows) - Elastic Agent Only
   hosts: target_windows
   become: yes
   become_method: runas
   vars:
-    elasticsearch_version: "9.1.5" # Can update with any version if needed (watch for compatability!)
-    kibana_version: "9.1.5" # Can update with any version if needed (watch for compatability!)
-    elastic_agent_version: "9.1.5" # Can update with any version if needed (watch for compatibability!)
-    elasticsearch_dir: "C:\\elasticsearch-{{ elasticsearch_version }}"
-    kibana_dir: "C:\\kibana-{{ kibana_version }}"
-    elastic_agent_dir: "C\\elastic-agent-{{elastic_agent_version}}-windows-x86_64"
+    elastic_agent_version: "9.1.5"
+    insecure: true
+
+  vars_files:
+    - ../../logging/linux/.fleet_credentials.yml
+
   tasks:
-    - name: Elasticsearch Download and Unzip
-      tasks:
-        - name: Obtain Elasticsearch Setup ZIP
-          win_get_url:
-            url: "https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-{{ elasticsearch_version }}-windows-x86_64.zip"
-            dest: "C:\\Users\\Public\\Downloads\\Elasticsearch.zip"
-        - name: Unzip Elasticsearch
-          win_unzip:
-            src: "C:\\Users\\Public\\Downloads\\Elasticsearch.zip"
-            dest: "C:"
-            delete_archive: yes
+    - name: Verify Fleet credentials are loaded
+      assert:
+        that:
+          - fleet_url is defined
+          - fleet_enrollment_token is defined
+        fail_msg: |
+          Fleet credentials not found! Ensure logging server playbook has run and ../../logging/linux/.fleet_credentials.yml exists.
 
-    - name: Elasticsearch Service Start and Configuration
-      tasks:  
-        - name: Elasticsearch service install
-          win_command: "{{ elasticsearch_dir }}\\bin\\elastcsearch-service.bat install"
-        - name: Start Elasticsearch Service
-          win_command: "{{ elasticsearch_dir }}\\bin\\elastcsearch-service.bat start"
-        - name: Password reset for elastic superuser
-          win_command: "{{ elasticsearch_dir }}\\bin\\elasticsearch-reset-password -u elastic --batch"
-          register: reset_output
-        - name: Extract password from reset 
-          set_fact:
-              elastic_password: "{{ reset_output.stdout | regex_search('New value:\\s*(\\S+)', '\\1') }}"
-        - debug:
-            msg: "New password has been made for elastic superuser:\nValue: {{ elastic_password }}.\nPlease remember this password."
-        - name: Wait and Check for Elasticsearch to be available
-          win_uri:
-            url: "http://localhost:9200"
-            method: GET
-            status_code: 200
-            return_content: yes
-            timeout: 30
-            register: es_check
-            retries: 10
-            delay: 15
-            until: es_check.status == 200
+    - name: Copy Elastic Agent ZIP from controller (offline)
+      win_copy:
+        src: "{{ playbook_dir }}\\..\\..\\downloads\\elastic-agent-{{ elastic_agent_version }}-windows-x86_64.zip"
+        dest: "C:\\Users\\Public\\Downloads\\ElasticAgent.zip"
 
-    - name: Kibana Download and Unzip
-      tasks:
-      - name: Obtain Kibana Setup ZIP
-        win_get_url:
-          url: "https://artifacts.elastic.co/downloads/kibana/kibana-{{ kibana_version }}-windows-x86_64.zip" 
-          dest: "C:\\Users\\Public\\Downloads\\Kibana.zip"
-      - name: Unzip Kibana
-        win_unzip:
-          src: "C:\\Users\\Public\\Downloads\\Kibana.zip"
-          dest: "C:"
-          delete_archive: yes
-      
-    - name: Kibana Service start and Configuration
-      tasks:
-      - name: Get enrollment token
-        win_command: "{{ elasticsearch_dir }}\\bin\\elasticsearch-create-enrollment-token.bat -s kibana"
-        register: enrollment_token
-      - name: Configure kibana with enrollment token
-        win_command: "{{ kibana_dir }}\\bin\\kibana-setup --enrollment-token {{ enrollment_token }}"
-      - name: Create Kibana service with sc.exe
-        win_command: sc create Kibana binPath= "\"{{ kibana_home }}\\bin\\kibana.bat\"" start= auto
-        args:
-          chdir: "{{ kibana_home }}\\bin"
-      - name: Start Kibana service
-        win_service:
-          name: Kibana
-          state: started
+    - name: Unzip Elastic Agent
+      win_unzip:
+        src: "C:\\Users\\Public\\Downloads\\ElasticAgent.zip"
+        dest: "C:"
+        delete_archive: yes
 
-    - name: Elastic Agent Download and Unzip
-      tasks: 
-       - name: Obtain Elastic Agent Setup ZIP
-         win_get_url:
-           url: https://artifacts.elastic.co/downloads/beats/elastic-agent/elastic-agent-{{ elastic_agent_version }}-windows-x86_64.zip
-            dest: "C:\\Users\\Public\\Downloads\\ElasticAgent.zip"
-        - name: Unzip Elastic Agent
-          win_unzip:
-            src: "C:\\Users\\Public\\Downloads\\ElasticAgent.zip"
-            dest: "C:"
-            delete_archive: yes
-    
-    # NOTE: typically you'd use an API key w/ managed permissions to setup but since its contained lab going to go easier route
-    - name: Elastic Agent Configure, Install, and Start
-      tasks:
-        - name: Insert username
-          win_replace:
-            path: "{{ elastic_agent_dir}}\\elastic-agent.yml"
-            regexp: "#username:.*$"
-            replace: 'username: "elastic"'
-        - name: Insert password 
-          win_replace:
-            path: "{{ elastic_agent_dir}}\\elastic-agent.yml"
-            regexp: "#password:.*$"
-            replace: 'password: {{ elastic_password }}"'
-        - name: Remove api key
-          win_replace:
-            path: "{{ elastic_agent_dir}}\\elastic-agent.yml"
-            regexp: "api_key:.*$"
-            replace: ""
-        - name: Run agent service
-          win_command: "{{ elastic_agent_dir }}\\elastic-agent.exe install --url=\"http://localhost:9200\" --force --insecure"
+    - name: Install Elastic Agent with enrollment token
+      win_command: >-
+        C:\\elastic-agent-{{ elastic_agent_version }}-windows-x86_64\\elastic-agent.exe install
+        --url "{{ fleet_url }}"
+        --enrollment-token "{{ fleet_enrollment_token }}"
+        --insecure
+      args:
+        chdir: "C:\\elastic-agent-{{ elastic_agent_version }}-windows-x86_64"
 
-# Things that might need to be done:
-# - Make kibana accessible remotely and not just localhost
-# - make elasticsearch accessible remotely and not just localhost
-# - elasticsearch self-signed certs and https
-# - elastic agent probably needs less permissions than superuser, and should use api key
+    - name: Check Elastic Agent status (Windows)
+      win_command: C:\\Elastic\\Agent\\elastic-agent.exe status
+      register: win_agent_status
+      ignore_errors: yes
+
+    - debug:
+        msg: "Elastic Agent install output:\n{{ win_agent_status.stdout }}\nView agents in Kibana: {{ kibana_host }}/app/fleet/agents"
