@@ -10,7 +10,8 @@ set -euo pipefail
 #   5. Update the attacker security-group ingress rule with the current client IP.
 #   6. Run Terraform apply and kick off Ansible playbooks via deploy.py.
 
-PYTHON_BIN=python3.13
+# Allow callers to override the interpreter (e.g., PYTHON_BIN=python3.11 ./one_click_setup.sh)
+PYTHON_BIN=${PYTHON_BIN:-python3}
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
@@ -32,6 +33,16 @@ if [[ -z "${AWS_PROFILE:-}" && ( -z "${AWS_ACCESS_KEY_ID:-}" || -z "${AWS_SECRET
 [WARN] No AWS credentials detected (AWS_PROFILE or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY).
        Terraform commands will fail unless credentials are available via another mechanism (e.g., ~/.aws/credentials or instance profile).
 WARN
+fi
+
+# Verify Python version supports Ansible (>=3.10 required for ansible 9.x).
+PY_VERSION=$($PYTHON_BIN -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+PY_MAJOR=${PY_VERSION%.*}
+PY_MINOR=${PY_VERSION#*.}
+if (( PY_MAJOR < 3 )) || (( PY_MAJOR == 3 && PY_MINOR < 10 )); then
+  echo "[ERROR] Python $PY_VERSION detected via $PYTHON_BIN; ansible>=9.0.0 requires Python 3.10+." >&2
+  echo "        Install Python 3.10+ (e.g., python3.11) and re-run as PYTHON_BIN=python3.11 ./one_click_setup.sh" >&2
+  exit 1
 fi
 
 VENV_DIR="$ROOT_DIR/.venv"
