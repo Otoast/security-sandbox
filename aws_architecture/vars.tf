@@ -11,6 +11,12 @@ locals {
   internal_lab_key_info = local.config.internal_lab_ssh_key
   internal_lab_key_path = "${local.pub_key_dir}/${local.internal_lab_key_info.name}.pub"
 
+  # Generate a stable per-user suffix using MD5 so key names stay unique per IAM user.
+  user_identifier = substr(md5(local.config.user), 0, 8)
+
+  user_attacker_key_aws_name = "${local.user_attacker_key_info.name}-${local.user_identifier}"
+  internal_lab_key_aws_name  = "${local.internal_lab_key_info.name}-${local.user_identifier}"
+
   selected_ami = lookup({
     linux   = data.aws_ami.linux.id,
     windows = data.aws_ami.windows.id,
@@ -26,12 +32,12 @@ variable "availability_zone" {
 
 // Key-pair for attacker machine
 resource "aws_key_pair" "user_attacker_key" {
-  key_name   = local.user_attacker_key_info.name
+  key_name   = local.user_attacker_key_aws_name
   public_key = file(local.user_attacker_key_path)
 }
 
 resource "aws_key_pair" "internal_lab_key" {
-  key_name   = local.internal_lab_key_info.name
+  key_name   = local.internal_lab_key_aws_name
   public_key = file(local.internal_lab_key_path)
 }
 

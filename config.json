@@ -1,16 +1,13 @@
 {
   "user": "aws_lab_user",
-  "ssh_client_ip": "165.91.13.66",
+  "ssh_client_ip": "70.114.203.10",
   "target_private_ip": "10.0.0.10",
   "attacker_private_ip": "10.0.2.10",
   "logging_private_ip": "10.0.1.10",
   "target_machine_os": "linux",
-  
   "region": "us-east-1",
   "availability_zone": "us-east-1a",
-
   "ssh_keys_dir": "./ssh_keys",
-  
   "user_to_attacker_ssh_key": {
     "name": "user_to_attacker_key",
     "type": "ed25519",
