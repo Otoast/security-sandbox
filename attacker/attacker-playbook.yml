@@ -150,14 +150,13 @@
         group: ubuntu
       when: ansible_os_family == "Debian"
 
-    - name: Copy lab internal key pair (will be provided by Terraform user data)
+    - name: Copy internal_lab_key from local machine to attacker
       copy:
-        content: "{{ lab_internal_key }}"
-        dest: "/home/{{ ansible_user }}/.ssh/lab-internal-key.pem"
+        src: "../ssh_keys/internal_lab_key"
+        dest: "/home/{{ ansible_user }}/.ssh/internal_lab_key"
         mode: '0600'
         owner: "{{ ansible_user }}"
         group: "{{ ansible_user }}"
-      when: lab_internal_key is defined
 
     - name: Configure SSH client for internal connections
       blockinfile:
@@ -170,14 +169,38 @@
           Host target-machine
               HostName {{ target_private_ip | default('10.0.2.10') }}
               User ec2-user
-              IdentityFile ~/.ssh/lab-internal-key.pem
+              IdentityFile ~/.ssh/internal_lab_key
               StrictHostKeyChecking no
           
-          Host control-machine
+          Host logging-machine
               HostName {{ control_private_ip | default('10.0.3.10') }}
               User ec2-user
-              IdentityFile ~/.ssh/lab-internal-key.pem
+              IdentityFile ~/.ssh/internal_lab_key
               StrictHostKeyChecking no
+
+    - name: Create shell aliases for quick SSH access
+      blockinfile:
+        path: "/home/{{ ansible_user }}/.bashrc"
+        create: yes
+        mode: '0644'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        marker: "# {mark} ANSIBLE MANAGED - Lab SSH Shortcuts"
+        block: |
+          # Quick SSH shortcuts for lab machines
+          alias ssh-target='ssh target-machine'
+          alias ssh-logging='ssh logging-machine'
+          
+          # Helper function to show available shortcuts
+          lab-help() {
+            echo "Lab SSH Shortcuts:"
+            echo "  ssh-target   - Connect to target machine"
+            echo "  ssh-logging  - Connect to logging machine"
+            echo ""
+            echo "Or use SSH config directly:"
+            echo "  ssh target-machine"
+            echo "  ssh logging-machine"
+          }
 
     - name: Install Ansible on attacker machine
       apt:
