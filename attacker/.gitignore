@@ -1,0 +1,9 @@
+# Ignore all private key files
+*.pem
+
+# Ignore all public key files
+*.pub
+
+# Optional: Add other common sensitive files if you have them
+# .env
+# .terraform

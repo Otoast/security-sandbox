@@ -1,0 +1,235 @@
+---
+- name: Configure Attacker Machine for Elastic Security Lab
+  hosts: attacker
+  become: yes
+  vars:
+    atomic_red_team_path: "/opt/AtomicRedTeam"
+    project_repo_url: "https://github.com/Otoast/security-sandbox.git"
+    project_repo_path: "/opt/security-sandbox"  
+    
+  tasks:
+    - name: Update apt cache (Ubuntu/Debian)
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+
+    - name: Update yum cache (Amazon Linux/RedHat)
+      yum:
+        update_cache: yes
+      when: ansible_os_family == "RedHat"
+
+    - name: Install required packages (Ubuntu/Debian)
+      apt:
+        name:
+          - git
+          - wget
+          - curl
+          - unzip
+          - python3
+          - python3-pip
+          - openssh-client
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Install required packages (Amazon Linux/RedHat)
+      yum:
+        name:
+          - git
+          - wget
+          - curl
+          - unzip
+          - python3
+          - python3-pip
+          - openssh-clients
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Install PowerShell (Ubuntu/Debian)
+      block:
+        - name: Install required dependencies
+          apt:
+            name:
+              - wget
+              - apt-transport-https
+              - software-properties-common
+            state: present
+            update_cache: yes
+
+        - name: Download and install Microsoft repository configuration
+          shell: |
+            wget -q "https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/packages-microsoft-prod.deb"
+            dpkg -i packages-microsoft-prod.deb
+            rm -f packages-microsoft-prod.deb
+            apt-get update
+          args:
+            executable: /bin/bash
+            creates: /etc/apt/sources.list.d/microsoft-prod.list
+
+        - name: Install PowerShell from Microsoft repository
+          apt:
+            name: powershell
+            state: present
+            update_cache: yes
+      when: ansible_os_family == "Debian"
+
+    - name: Install PowerShell (Amazon Linux)
+      block:
+        - name: Download PowerShell tar.gz
+          get_url:
+            url: "https://github.com/PowerShell/PowerShell/releases/download/v7.4.0/powershell-7.4.0-linux-x64.tar.gz"
+            dest: "/tmp/powershell.tar.gz"
+            mode: '0644'
+
+        - name: Create PowerShell directory
+          file:
+            path: /opt/microsoft/powershell/7
+            state: directory
+            mode: '0755'
+
+        - name: Extract PowerShell
+          unarchive:
+            src: "/tmp/powershell.tar.gz"
+            dest: /opt/microsoft/powershell/7
+            remote_src: yes
+
+        - name: Create PowerShell symlink
+          file:
+            src: /opt/microsoft/powershell/7/pwsh
+            dest: /usr/bin/pwsh
+            state: link
+      when: ansible_os_family == "RedHat"
+
+    - name: Create Atomic Red Team directory
+      file:
+        path: "{{ atomic_red_team_path }}"
+        state: directory
+        mode: '0755'
+
+    - name: Clone Atomic Red Team repository
+      git:
+        repo: 'https://github.com/redcanaryco/atomic-red-team.git'
+        dest: "{{ atomic_red_team_path }}"
+        version: master
+        force: yes
+
+    - name: Install Invoke-AtomicRedTeam PowerShell module
+      shell: |
+        pwsh -Command "
+        Install-Module -Name invoke-atomicredteam,powershell-yaml -Scope AllUsers -Force
+        Import-Module invoke-atomicredteam
+        "
+      args:
+        executable: /bin/bash
+      register: powershell_module_install
+      changed_when: powershell_module_install.rc == 0
+
+   # - name: Clone project repository with Ansible scripts
+    #  git:
+    #    repo: "{{ project_repo_url }}"
+    #    dest: "{{ project_repo_path }}"
+    #    version: main
+    #    force: yes
+    #  ignore_errors: yes  # In case repo doesn't exist yet
+
+    - name: Create SSH directory for lab keys
+      file:
+        path: /home/ec2-user/.ssh
+        state: directory
+        mode: '0700'
+        owner: ec2-user
+        group: ec2-user
+      when: ansible_os_family == "RedHat"
+
+    - name: Create SSH directory for lab keys (Ubuntu)
+      file:
+        path: /home/ubuntu/.ssh
+        state: directory
+        mode: '0700'
+        owner: ubuntu
+        group: ubuntu
+      when: ansible_os_family == "Debian"
+
+    - name: Copy lab internal key pair (will be provided by Terraform user data)
+      copy:
+        content: "{{ lab_internal_key }}"
+        dest: "/home/{{ ansible_user }}/.ssh/lab-internal-key.pem"
+        mode: '0600'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+      when: lab_internal_key is defined
+
+    - name: Configure SSH client for internal connections
+      blockinfile:
+        path: "/home/{{ ansible_user }}/.ssh/config"
+        create: yes
+        mode: '0600'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        block: |
+          Host target-machine
+              HostName {{ target_private_ip | default('10.0.2.10') }}
+              User ec2-user
+              IdentityFile ~/.ssh/lab-internal-key.pem
+              StrictHostKeyChecking no
+          
+          Host control-machine
+              HostName {{ control_private_ip | default('10.0.3.10') }}
+              User ec2-user
+              IdentityFile ~/.ssh/lab-internal-key.pem
+              StrictHostKeyChecking no
+
+    - name: Install Ansible on attacker machine
+      apt:
+        name: ansible
+        state: present
+        update_cache: yes
+
+    - name: Create lab configuration file
+      copy:
+        dest: "/opt/security-sandbox/lab-config.yaml" 
+        content: |
+          lab_name: "Elastic Security Sandbox"
+          target_ip: "{{ target_private_ip | default('10.0.2.10') }}"
+          control_ip: "{{ control_private_ip | default('10.0.3.10') }}"
+          atomic_path: "{{ atomic_red_team_path }}"
+        mode: '0644'
+
+    - name: Create welcome message
+      copy:
+        dest: /etc/motd
+        content: |
+          ================================================
+          Welcome to the Elastic Security Lab
+          ================================================
+          
+          This is the ATTACKER machine. From here you can:
+          
+          1. Run Atomic Red Team tests:
+             cd {{ atomic_red_team_path }}
+             pwsh
+             Import-Module invoke-atomicredteam
+             Invoke-AtomicTest T1003.001 -ShowDetails
+          
+          2. SSH to other lab machines:
+             ssh target-machine
+             ssh control-machine
+          
+          3. Access Kibana (from your browser):
+             http://<control-machine-ip>:5601
+          
+          4. Run Ansible playbooks:
+             cd {{ project_repo_path }}
+             ansible-playbook control-machine-playbook.yml
+             ansible-playbook target-machine-playbook.yml
+          
+          ================================================
+        mode: '0644'
+
+    - name: Display completion message
+      debug:
+        msg: 
+          - "Attacker machine configuration complete!"
+          - "Atomic Red Team installed at: {{ atomic_red_team_path }}"
+          - "Project repository cloned to: {{ project_repo_path }}"
+          - "You can now run Atomic tests and configure other machines"
