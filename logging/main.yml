@@ -8,6 +8,11 @@
     kibana_dir: "/opt/kibana-{{ elastic_version }}"
     # Download cache on Ansible controller (attacker machine)
     local_cache_dir: "{{ playbook_dir }}/downloads"
+    # Kibana / Fleet connection settings
+    kibana_base_url: "http://localhost:5601"
+    kibana_request_timeout: 60
+    fleet_api_retries: 10
+    fleet_api_delay: 10
 
   tasks:
     ############################################################################
@@ -254,7 +259,7 @@
 
     - name: Wait for Kibana license to be available
       uri:
-        url: "http://localhost:5601/api/status"
+        url: "{{ kibana_base_url }}/api/status"
         method: GET
         user: elastic
         password: "{{ elastic_password }}"
@@ -263,6 +268,7 @@
           kbn-xsrf: "true"
         status_code: 200
         return_content: yes
+        timeout: "{{ kibana_request_timeout }}"
       register: kibana_status
       retries: 20
       delay: 15
@@ -270,7 +276,7 @@
 
     - name: Enable Fleet in Kibana
       uri:
-        url: "http://localhost:5601/api/fleet/setup"
+        url: "{{ kibana_base_url }}/api/fleet/setup"
         method: POST
         user: elastic
         password: "{{ elastic_password }}"
@@ -278,6 +284,7 @@
         headers:
           kbn-xsrf: "true"
           Content-Type: "application/json"
+        timeout: "{{ kibana_request_timeout }}"
         status_code: 200
         return_content: yes
       register: fleet_setup
@@ -290,7 +297,7 @@
 
     - name: Get Fleet Server policy
       uri:
-        url: "http://localhost:5601/api/fleet/agent_policies"
+        url: "{{ kibana_base_url }}/api/fleet/agent_policies"
         method: GET
         user: elastic
         password: "{{ elastic_password }}"
@@ -299,6 +306,7 @@
           kbn-xsrf: "true"
         status_code: 200
         return_content: yes
+        timeout: "{{ kibana_request_timeout }}"
       register: fleet_policies
       retries: 10
       delay: 10
@@ -321,7 +329,7 @@
 
     - name: Create Fleet Server policy if it doesn't exist
       uri:
-        url: "http://localhost:5601/api/fleet/agent_policies"
+        url: "{{ kibana_base_url }}/api/fleet/agent_policies"
         method: POST
         user: elastic
         password: "{{ elastic_password }}"
@@ -338,10 +346,15 @@
             - logs
             - metrics
           has_fleet_server: true
-        status_code: 200
+        status_code: [200, 201, 409]
         return_content: yes
+        timeout: "{{ kibana_request_timeout }}"
       register: fleet_server_policy_created
+      failed_when: false
       when: not fleet_server_policy_exists
+      retries: "{{ fleet_api_retries }}"
+      delay: "{{ fleet_api_delay }}"
+      until: fleet_server_policy_created.status in [200, 201, 409]
 
     - name: Get Fleet Server policy ID
       set_fact:
@@ -349,7 +362,7 @@
 
     - name: Add Fleet Server integration to policy
       uri:
-        url: "http://localhost:5601/api/fleet/package_policies"
+        url: "{{ kibana_base_url }}/api/fleet/package_policies"
         method: POST
         user: elastic
         password: "{{ elastic_password }}"
@@ -378,10 +391,14 @@
                   value: 8220
                   type: "integer"
                 custom: ""
-        status_code: [200, 409]
+        status_code: [200, 201, 409]
         return_content: yes
+        timeout: "{{ kibana_request_timeout }}"
       register: fleet_server_integration
       failed_when: false
+      retries: "{{ fleet_api_retries }}"
+      delay: "{{ fleet_api_delay }}"
+      until: fleet_server_integration.status in [200, 201, 409]
 
     ############################################################################
     # PHASE 4: FLEET SERVER INSTALLATION
@@ -442,7 +459,7 @@
       shell: |
         cd /opt/elastic-agent-{{ elastic_version }}-linux-x86_64
         ./elastic-agent install \
-          --url=http://localhost:5601 \
+          --url={{ kibana_base_url }} \
           --fleet-server-es=http://localhost:9200 \
           --fleet-server-service-token={{ fleet_service_token.json.token.value }} \
           --fleet-server-policy={{ fleet_server_policy_id }} \
@@ -459,7 +476,7 @@
 
     - name: Get Fleet enrollment API key list
       uri:
-        url: "http://localhost:5601/api/fleet/enrollment_api_keys"
+        url: "{{ kibana_base_url }}/api/fleet/enrollment_api_keys"
         method: GET
         user: elastic
         password: "{{ elastic_password }}"
@@ -468,6 +485,7 @@
           kbn-xsrf: "true"
         status_code: 200
         return_content: yes
+        timeout: "{{ kibana_request_timeout }}"
       register: existing_enrollment_keys
       failed_when: false
 
@@ -489,7 +507,7 @@
 
     - name: Create Fleet enrollment API key if missing
       uri:
-        url: "http://localhost:5601/api/fleet/enrollment_api_keys"
+        url: "{{ kibana_base_url }}/api/fleet/enrollment_api_keys"
         method: POST
         user: elastic
         password: "{{ elastic_password }}"
@@ -502,8 +520,9 @@
           name: "auto-enroll"
           policy_id: "{{ fleet_server_policy_id }}"
           expiration: "1d"
-        status_code: 200
+        status_code: [200, 201]
         return_content: yes
+        timeout: "{{ kibana_request_timeout }}"
       register: fleet_enrollment_response
       when: not fleet_enrollment_key_found
       failed_when: false
