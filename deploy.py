@@ -62,13 +62,15 @@ def get_attacker_ip():
     """Attempt to retrieve attacker public IP from Terraform outputs; fallback to config.json."""
     aws_arch_dir = Path(__file__).parent / "aws_architecture"
     try:
-        result = subprocess.run([
-            "terraform", "output", "-json"
-        ], cwd=aws_arch_dir, capture_output=True, text=True, check=True)
+        result = subprocess.run(["terraform", "output", "-json"], cwd=aws_arch_dir, capture_output=True, text=True, check=True)
         outputs = json.loads(result.stdout or "{}")
-        for key in ("attacker_ip", "attacker_public_ip", "attacker_machine_ip"):
-            if key in outputs and isinstance(outputs[key], dict) and "value" in outputs[key]:
-                return outputs[key]["value"]
+        attacker_pub = outputs.get("attacker_public_ip", {}).get("value")
+        if attacker_pub:
+            # Persist into config.json for later runs
+            update_config(DEFAULT_CONFIG_PATH, {"attacker_ip": attacker_pub, "attacker_public_ip": attacker_pub})
+            return attacker_pub
+        else:
+            print("[INFO] Terraform output missing 'attacker_public_ip'. Falling back to config.json.")
     except Exception as e:
         print(f"[INFO] Terraform outputs not available for attacker IP: {e}")
     cfg = load_config()
@@ -78,23 +80,36 @@ def get_attacker_ip():
 def setup_attacker():
     """Run attacker/main.yml playbook with attacker/attacker.ini inventory."""
     att_dir = Path(__file__).parent / "attacker"
-    playbook = att_dir / "attacker-playbook.yml"
+    playbook = att_dir / "main.yml"
     inventory = att_dir / "inventory.ini"
-    # Inline: update inventory with attacker public IP
     attacker_host = get_attacker_ip()
-    # Replace entire ansible_host= line with the detected attacker IP
     lines = inventory.read_text().splitlines()
     new_lines = []
+    in_attacker_section = False
+    replaced = False
     for line in lines:
-        if line.strip().startswith("ansible_host="):
-            new_lines.append(f"ansible_host={attacker_host}")
-        else:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            # entering a (new) section
+            in_attacker_section = (stripped.lower() == "[attacker]")
             new_lines.append(line)
+            continue
+        if in_attacker_section and not replaced:
+            # replace the first non-empty, non-comment line in attacker section with the IP
+            if stripped and not stripped.startswith("#"):
+                new_lines.append(str(attacker_host))
+                replaced = True
+                continue
+        new_lines.append(line)
+    # If attacker section was found but had no host line, append it
+    if in_attacker_section and not replaced:
+        new_lines.append(str(attacker_host))
     inventory.write_text("\n".join(new_lines) + "\n")
 
     print("Running attacker setup...")
     run_command([
-        "ansible-playbook", str(playbook), "-i", str(inventory)
+        "ansible-playbook", str(playbook), "-i", str(inventory),
+        "-e", 'ansible_ssh_common_args="-o StrictHostKeyChecking=no"'
     ], cwd=att_dir)
 
 def setup_logging(attacker_host: str, attacker_user: str, ssh_key_path: Path):
@@ -161,7 +176,7 @@ def main():
     args = parser.parse_args()
     aws_arch_dir = Path(__file__).parent / "aws_architecture"
 
-
+    print("Loading environment variables...")
     env_path = Path(__file__).parent / ".env"
     if not env_path.exists():
         env_path = Path(__file__).parent.parent / ".env"
@@ -210,24 +225,14 @@ def main():
             update_config(DEFAULT_CONFIG_PATH, {"target_machine_os": args.target})
 
         run_command(["terraform", "apply", "-auto-approve"], cwd=aws_arch_dir)
-
-        print("\nFetching Terraform outputs...")
-        tf_output = subprocess.run(
-            ["terraform", "output", "-json"],
-            cwd=aws_arch_dir,
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        print(f"Terraform Output:\n{tf_output.stdout}")
-
+        print("Terraform apply complete.")
         if not args.no_ansible:
             attacker_host = get_attacker_ip() 
             complete_setup = args.setup in [None, "all"]
             if complete_setup or args.setup == "attacker":
                 setup_attacker()
             if complete_setup or args.setup == "logging": 
-                setup_logging(attacker_host, "ec2-user", user_to_attacker_key)
+                setup_logging(attacker_host, "ec2-user", "~/ssh_keys/" + config["user_to_attacker_ssh_key"]["name"])
             if complete_setup or args.setup == "target":
                 setup_target(os_name, attacker_host, "ec2-user", user_to_attacker_key)
             
