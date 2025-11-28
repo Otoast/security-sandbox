@@ -229,8 +229,8 @@ def main():
         if not args.no_ansible:
             attacker_host = get_attacker_ip() 
             complete_setup = args.setup in [None, "all"]
-            # if complete_setup or args.setup == "attacker":
-            #     setup_attacker()
+            if complete_setup or args.setup == "attacker":
+                setup_attacker()
             if complete_setup or args.setup == "logging": 
                 setup_logging(attacker_host, "ec2-user", user_to_attacker_key)
             if complete_setup or args.setup == "target":
