@@ -141,7 +141,7 @@ resource "aws_security_group_rule" "user_to_attacker_ssh" {
   from_port         = 22
   to_port           = 22
   protocol          = "tcp"
-  cidr_blocks       = [local.config.user_ip + "/32"] # TODO: change to your real IP
+  cidr_blocks = ["${local.config.user_ip}/32"] # TODO: change to your real IP
   security_group_id = aws_security_group.attacker_machine_sg.id
   description       = "Accept SSH connection from user"
 }

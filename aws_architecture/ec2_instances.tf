@@ -1,7 +1,7 @@
 resource "aws_instance" "attacker_machine" {
     ami = data.aws_ami.linux.id
     
-    instance_type = "t3.medium"
+    instance_type = "m7i-flex.large"
 
     private_ip = local.config.attacker_private_ip
     security_groups = [ aws_security_group.attacker_machine_sg.id ]
@@ -15,7 +15,7 @@ resource "aws_instance" "attacker_machine" {
     }
     
     root_block_device {
-      volume_size = 20
+      volume_size = 30
     }
 }
 
@@ -35,7 +35,7 @@ resource "aws_instance" "logging_machine" {
     }
     
     root_block_device {
-      volume_size = 20
+      volume_size = 30
     }
 
 }
@@ -43,7 +43,7 @@ resource "aws_instance" "logging_machine" {
 resource "aws_instance" "target_machine" {
     ami = local.selected_ami
 
-    instance_type = "t3.medium"
+    instance_type = "m7i-flex.large"
 
     private_ip = local.config.target_private_ip
     security_groups = [ aws_security_group.target_machine_sg.id ]
@@ -57,6 +57,6 @@ resource "aws_instance" "target_machine" {
     }
 
     root_block_device {
-      volume_size = 10
+      volume_size = 30
     }
 }
