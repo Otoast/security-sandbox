@@ -48,7 +48,6 @@ def reset_all(terraform_dir: Path):
     run_command(["terraform", "apply", "-auto-approve"], cwd=terraform_dir)
     print("All instances reset complete.")
 
-
 def load_config():
     """Load config.json and return dict; empty dict on failure."""
     try:
@@ -113,36 +112,36 @@ def setup_attacker():
     ], cwd=att_dir)
 
 def setup_logging(attacker_host: str, attacker_user: str, ssh_key_path: Path):
-    """Copy logging files and ssh_keys to attacker, then run ansible-playbook on attacker."""
-    base_dir = Path(__file__).parent
-    print(f"Copying logging/ and ssh_keys/ to attacker ({attacker_host})...")
-    scp_cmd = [
-        "scp", "-o", "StrictHostKeyChecking=no", "-i", str(ssh_key_path), "-r",
-        str(base_dir / "logging"), str(base_dir / "ssh_keys"),
-        f"{attacker_user}@{attacker_host}:~/"
-    ]
-    run_command(scp_cmd)
-    print(f"Running logging setup on attacker...")
-    run_remote_ssh(ssh_key_path, attacker_user, attacker_host, "cd ~/logging && ansible-playbook main.yml -i logging_server.ini")
-    print(f"Cleaning up copied files on attacker...")
-    run_remote_ssh(ssh_key_path, attacker_user, attacker_host, "rm -rf ~/logging ~/ssh_keys")
+    """Run logging playbook locally. Pass ansible_ssh_common_args to use attacker as jump host."""
+    log_dir = Path(__file__).parent / "logging"
+    playbook = log_dir / "main.yml"
+    inventory = log_dir / "logging_server.ini"
+    proxy = f'\'-o StrictHostKeyChecking=no -o ProxyCommand="ssh -i {ssh_key_path} -o StrictHostKeyChecking=no {attacker_user}@{attacker_host} -W %h:%p"\''
+    print(f"Running logging setup locally (inventory: {inventory}) using attacker {attacker_host} as jump host")
+    run_command([
+        "ansible-playbook",
+        str(playbook),
+        "-i",
+        str(inventory),
+        "-e",
+        f'ansible_ssh_common_args={proxy}'
+    ], cwd=log_dir)
 
 def setup_target(os_name: str, attacker_host: str, attacker_user: str, ssh_key_path: Path):
     """Copy target files and ssh_keys to attacker, then run ansible-playbook on attacker."""
-    base_dir = Path(__file__).parent
-    
-    print(f"Copying target/ and ssh_keys/ to attacker ({attacker_host})...")
-    scp_cmd = [
-        "scp", "-o", "StrictHostKeyChecking=no", "-i", str(ssh_key_path), "-r",
-        str(base_dir / "target"), str(base_dir / "ssh_keys"),
-        f"{attacker_user}@{attacker_host}:~/"
-    ]
-    run_command(scp_cmd)
-    
+    log_dir = Path(__file__).parent / "target"
+    playbook = log_dir / "main.yml"
+    inventory = log_dir / f"target_{os_name}.ini"
     print(f"Running target ({os_name}) setup on attacker...")
-    run_remote_ssh(ssh_key_path, attacker_user, attacker_host, f"cd ~/target/{os_name} && ansible-playbook main.yml -i target_{os_name}.ini")
-    print(f"Cleaning up copied files on attacker...")
-    run_remote_ssh(ssh_key_path, attacker_user, attacker_host, "rm -rf ~/target ~/ssh_keys")
+    proxy = f'\'-o StrictHostKeyChecking=no -o ProxyCommand="ssh -i {ssh_key_path} -o StrictHostKeyChecking=no {attacker_user}@{attacker_host} -W %h:%p"\''
+    run_command([
+        "ansible-playbook",
+        str(playbook),
+        "-i",
+        str(inventory),
+        "-e",
+        f"ansible_ssh_common_args={proxy}"
+    ], cwd=log_dir)
 
 def run_remote_ssh(key_path: Path, user: str, host: str, remote_command: str):
     """Execute a remote shell command on attacker via SSH.
@@ -232,7 +231,7 @@ def main():
             if complete_setup or args.setup == "attacker":
                 setup_attacker()
             if complete_setup or args.setup == "logging": 
-                setup_logging(attacker_host, "ec2-user", "~/ssh_keys/" + config["user_to_attacker_ssh_key"]["name"])
+                setup_logging(attacker_host, "ec2-user", user_to_attacker_key) # user_to_attacker_key
             if complete_setup or args.setup == "target":
                 setup_target(os_name, attacker_host, "ec2-user", user_to_attacker_key)
             

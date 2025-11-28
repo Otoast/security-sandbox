@@ -2,7 +2,7 @@
   "user": "otoast",
   "user_ip": "99.116.244.138",
   "attacker_private_ip": "10.0.2.10",
-  "attacker_public_ip": "54.147.234.144",
+  "attacker_public_ip": "18.233.97.35",
   "target_private_ip": "10.0.0.10",
   "target_machine_os": "linux",
   "logging_private_ip": "10.0.1.10",
@@ -11,15 +11,15 @@
   "ssh_keys_dir": "./ssh_keys",
   "user_to_attacker_ssh_key": {
     "name": "user_to_attacker_key",
-    "type": "ed25519",
+    "type": "rsa",
     "passphrase": "",
     "comment": "Locally generated key pair to attacker instance"
   },
   "internal_lab_ssh_key": {
     "name": "internal_lab_key",
-    "type": "ed25519",
+    "type": "rsa",
     "passphrase": "",
     "comment": "Locally generated key pair to internal lab instances"
   },
-  "attacker_ip": "54.147.234.144"
+  "attacker_ip": "18.233.97.35"
 }

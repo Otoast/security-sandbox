@@ -97,9 +97,9 @@ resource "aws_security_group_rule" "attacker_to_logging_kibana" {
   from_port                = 5601
   to_port                  = 5601
   protocol                 = "tcp"
-  source_security_group_id = aws_security_group.attacker_machine_sg.id
-  security_group_id        = aws_security_group.logging_machine_sg.id
-  description              = "Kibana port"
+  source_security_group_id = aws_security_group.logging_machine_sg.id
+  security_group_id        = aws_security_group.attacker_machine_sg.id
+  description              = "attacker access Kibana port"
 }
 
 # Attacker → Logging (Elasticsearch)
@@ -108,9 +108,9 @@ resource "aws_security_group_rule" "attacker_to_logging_elasticsearch" {
   from_port                = 9200
   to_port                  = 9200
   protocol                 = "tcp"
-  source_security_group_id = aws_security_group.attacker_machine_sg.id
-  security_group_id        = aws_security_group.logging_machine_sg.id
-  description              = "Elasticsearch port"
+  source_security_group_id = aws_security_group.logging_machine_sg.id
+  security_group_id        = aws_security_group.attacker_machine_sg.id
+  description              = "attacker access Elasticsearch port"
 }
 
 # Attacker → Target (SSH)
@@ -119,8 +119,8 @@ resource "aws_security_group_rule" "attacker_to_target_ssh" {
   from_port                = 22
   to_port                  = 22
   protocol                 = "tcp"
-  source_security_group_id = aws_security_group.attacker_machine_sg.id
-  security_group_id        = aws_security_group.target_machine_sg.id
+  source_security_group_id = aws_security_group.target_machine_sg.id
+  security_group_id        = aws_security_group.attacker_machine_sg.id
   description              = "SSH into target, Ansible setup"
 }
 
@@ -130,8 +130,8 @@ resource "aws_security_group_rule" "attacker_to_logging_ssh" {
   from_port                = 22
   to_port                  = 22
   protocol                 = "tcp"
-  source_security_group_id = aws_security_group.attacker_machine_sg.id
-  security_group_id        = aws_security_group.logging_machine_sg.id
+  source_security_group_id = aws_security_group.logging_machine_sg.id
+  security_group_id        = aws_security_group.attacker_machine_sg.id
   description              = "SSH into logging machine"
 }
 
@@ -163,8 +163,8 @@ resource "aws_security_group_rule" "target_to_logging_fleet" {
   from_port                = 8220
   to_port                  = 8220
   protocol                 = "tcp"
-  source_security_group_id = aws_security_group.target_machine_sg.id
-  security_group_id        = aws_security_group.logging_machine_sg.id
+  source_security_group_id = aws_security_group.logging_machine_sg.id
+  security_group_id        = aws_security_group.target_machine_sg.id
   description              = "Send logs to Fleet server"
 }
 
@@ -176,7 +176,7 @@ resource "aws_security_group_rule" "logging_from_target_fleet" {
   protocol                 = "tcp"
   source_security_group_id = aws_security_group.target_machine_sg.id
   security_group_id        = aws_security_group.logging_machine_sg.id
-  description              = "Fleet server port"
+  description              = "Accept logs sent by target to Fleet port"
 }
 
 # Logging ← Attacker (Kibana)
@@ -187,7 +187,7 @@ resource "aws_security_group_rule" "logging_from_attacker_kibana" {
   protocol                 = "tcp"
   source_security_group_id = aws_security_group.attacker_machine_sg.id
   security_group_id        = aws_security_group.logging_machine_sg.id
-  description              = "Kibana port"
+  description              = "attacker allow access to Kibana port"
 }
 
 # Logging ← Attacker (Elasticsearch)
@@ -198,7 +198,7 @@ resource "aws_security_group_rule" "logging_from_attacker_elasticsearch" {
   protocol                 = "tcp"
   source_security_group_id = aws_security_group.attacker_machine_sg.id
   security_group_id        = aws_security_group.logging_machine_sg.id
-  description              = "Elasticsearch port"
+  description              = "attacker allow access to Elasticsearch port"
 }
 
 # Logging ← Attacker (SSH)
