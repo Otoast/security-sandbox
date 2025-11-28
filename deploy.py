@@ -109,14 +109,15 @@ def setup_attacker():
     run_command([
         "ansible-playbook", str(playbook), "-i", str(inventory),
         "-e", 'ansible_ssh_common_args="-o StrictHostKeyChecking=no"'
-    ], cwd=att_dir)
+    ], cwd=Path(__file__).parent )
 
 def setup_logging(attacker_host: str, attacker_user: str, ssh_key_path: Path):
     """Run logging playbook locally. Pass ansible_ssh_common_args to use attacker as jump host."""
     log_dir = Path(__file__).parent / "logging"
     playbook = log_dir / "main.yml"
     inventory = log_dir / "logging_server.ini"
-    proxy = f'\'-o StrictHostKeyChecking=no -o ProxyCommand="ssh -i {ssh_key_path} -o StrictHostKeyChecking=no {attacker_user}@{attacker_host} -W %h:%p"\''
+
+    proxy = f'-o StrictHostKeyChecking=no -o ProxyCommand="ssh -o StrictHostKeyChecking=no -W %h:%p -q {attacker_user}@{attacker_host} -i {ssh_key_path} "'
     print(f"Running logging setup locally (inventory: {inventory}) using attacker {attacker_host} as jump host")
     run_command([
         "ansible-playbook",
@@ -124,24 +125,24 @@ def setup_logging(attacker_host: str, attacker_user: str, ssh_key_path: Path):
         "-i",
         str(inventory),
         "-e",
-        f'ansible_ssh_common_args={proxy}'
-    ], cwd=log_dir)
+        f"ansible_ssh_common_args='{proxy}'"
+    ], cwd=Path(__file__).parent )
 
 def setup_target(os_name: str, attacker_host: str, attacker_user: str, ssh_key_path: Path):
     """Copy target files and ssh_keys to attacker, then run ansible-playbook on attacker."""
-    log_dir = Path(__file__).parent / "target"
-    playbook = log_dir / "main.yml"
-    inventory = log_dir / f"target_{os_name}.ini"
+    target_dir = Path(__file__).parent / "target"
+    playbook = target_dir / "main.yml"
+    inventory = target_dir / f"target_{os_name}.ini"
     print(f"Running target ({os_name}) setup on attacker...")
-    proxy = f'\'-o StrictHostKeyChecking=no -o ProxyCommand="ssh -i {ssh_key_path} -o StrictHostKeyChecking=no {attacker_user}@{attacker_host} -W %h:%p"\''
+    proxy = f'-o StrictHostKeyChecking=no -o ProxyCommand="ssh -o StrictHostKeyChecking=no -W %h:%p -q {attacker_user}@{attacker_host} -i {ssh_key_path} "'
     run_command([
         "ansible-playbook",
         str(playbook),
         "-i",
         str(inventory),
         "-e",
-        f"ansible_ssh_common_args={proxy}"
-    ], cwd=log_dir)
+        f"ansible_ssh_common_args='{proxy}'"
+    ], cwd=Path(__file__).parent )
 
 def run_remote_ssh(key_path: Path, user: str, host: str, remote_command: str):
     """Execute a remote shell command on attacker via SSH.
@@ -228,10 +229,10 @@ def main():
         if not args.no_ansible:
             attacker_host = get_attacker_ip() 
             complete_setup = args.setup in [None, "all"]
-            if complete_setup or args.setup == "attacker":
-                setup_attacker()
+            # if complete_setup or args.setup == "attacker":
+            #     setup_attacker()
             if complete_setup or args.setup == "logging": 
-                setup_logging(attacker_host, "ec2-user", user_to_attacker_key) # user_to_attacker_key
+                setup_logging(attacker_host, "ec2-user", user_to_attacker_key)
             if complete_setup or args.setup == "target":
                 setup_target(os_name, attacker_host, "ec2-user", user_to_attacker_key)
             
