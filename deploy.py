@@ -1,16 +1,13 @@
 import os
 import subprocess
 import sys
-import shutil
 import json
 import argparse
 from pathlib import Path
-from urllib.request import urlopen, Request
-from urllib.error import URLError, HTTPError
+from urllib.request import urlopen
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.json"
-
 
 def load_env(env_path: Path):
     if not env_path.exists():
@@ -23,63 +20,22 @@ def load_env(env_path: Path):
                 key, _, value = line.strip().partition("=")
                 os.environ[key.strip()] = value.strip()
 
-
-def ensure_installed(cmd, install_instructions):
-    if shutil.which(cmd):
-        print(f"{cmd} is already installed.")
-        return True
-    print(f"{cmd} is not installed.")
-    print(f"{install_instructions}")
-    return False
-
-
 def run_command(cmd, cwd=None, check=True):
     print(f"\nRunning: {' '.join(cmd)} (in {cwd or os.getcwd()})")
     subprocess.run(cmd, cwd=cwd, check=check)
 
-
 def get_public_ip():
-    services = [
-        "https://api.ipify.org?format=json",
-        "https://ifconfig.co/json",
-        "https://ipinfo.io/json",
-    ]
-    headers = {"User-Agent": "curl/7.0"}
-    for svc in services:
-        try:
-            req = Request(svc, headers=headers)
-            with urlopen(req, timeout=10) as resp:
-                raw = resp.read().decode("utf-8")
-                try:
-                    data = json.loads(raw)
-                except json.JSONDecodeError:
-                    ip = raw.strip()
-                    if ip:
-                        return ip
-                    continue
-                for key in ("ip", "query", "address"):
-                    if key in data:
-                        return str(data[key])
-        except (URLError, HTTPError) as e:
-            print(f"Service {svc} failed: {e}")
-            continue
-        except Exception as e:
-            print(f"Unexpected error querying {svc}: {e}")
-            continue
-    print("Unable to determine public IP from known services.")
-    return None
-
+    """Detect public IP using ipify service."""
+    try:
+        with urlopen("https://api.ipify.org", timeout=10) as resp:
+            return resp.read().decode().strip()
+    except Exception as e:
+        print(f"Failed to detect public IP: {e}")
+        return None
 
 def update_config(config_path: Path, updates: dict):
-    if config_path.exists():
-        try:
-            with open(config_path, "r") as f:
-                cfg = json.load(f)
-        except Exception:
-            print(f"Warning: could not parse existing {config_path}, overwriting.")
-            cfg = {}
-    else:
-        cfg = {}
+    with open(config_path, "r") as f:
+        cfg = json.load(f)
     cfg.update(updates)
     with open(config_path, "w") as f:
         json.dump(cfg, f, indent=2)
@@ -92,7 +48,6 @@ def reset_all(terraform_dir: Path):
     run_command(["terraform", "apply", "-auto-approve"], cwd=terraform_dir)
     print("All instances reset complete.")
 
-
 def load_config():
     """Load config.json and return dict; empty dict on failure."""
     try:
@@ -102,23 +57,19 @@ def load_config():
         print(f"[WARN] Could not load config.json: {e}")
         return {}
 
-
 def get_attacker_ip():
-    """Attempt to retrieve attacker public IP from Terraform outputs; fallback to config.json.
-
-    Requires that terraform outputs define one of: attacker_ip, attacker_public_ip, attacker_machine_ip
-    Example Terraform output block to add (if missing):
-        output "attacker_public_ip" { value = aws_instance.attacker_machine.public_ip }
-    """
+    """Attempt to retrieve attacker public IP from Terraform outputs; fallback to config.json."""
     aws_arch_dir = Path(__file__).parent / "aws_architecture"
     try:
-        result = subprocess.run([
-            "terraform", "output", "-json"
-        ], cwd=aws_arch_dir, capture_output=True, text=True, check=True)
+        result = subprocess.run(["terraform", "output", "-json"], cwd=aws_arch_dir, capture_output=True, text=True, check=True)
         outputs = json.loads(result.stdout or "{}")
-        for key in ("attacker_ip", "attacker_public_ip", "attacker_machine_ip"):
-            if key in outputs and isinstance(outputs[key], dict) and "value" in outputs[key]:
-                return outputs[key]["value"]
+        attacker_pub = outputs.get("attacker_public_ip", {}).get("value")
+        if attacker_pub:
+            # Persist into config.json for later runs
+            update_config(DEFAULT_CONFIG_PATH, {"attacker_ip": attacker_pub, "attacker_public_ip": attacker_pub})
+            return attacker_pub
+        else:
+            print("[INFO] Terraform output missing 'attacker_public_ip'. Falling back to config.json.")
     except Exception as e:
         print(f"[INFO] Terraform outputs not available for attacker IP: {e}")
     cfg = load_config()
@@ -129,39 +80,68 @@ def setup_attacker():
     """Run attacker/main.yml playbook with attacker/attacker.ini inventory."""
     att_dir = Path(__file__).parent / "attacker"
     playbook = att_dir / "main.yml"
-    inventory = att_dir / "attacker.ini"
+    inventory = att_dir / "inventory.ini"
+    attacker_host = get_attacker_ip()
+    lines = inventory.read_text().splitlines()
+    new_lines = []
+    in_attacker_section = False
+    replaced = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            # entering a (new) section
+            in_attacker_section = (stripped.lower() == "[attacker]")
+            new_lines.append(line)
+            continue
+        if in_attacker_section and not replaced:
+            # replace the first non-empty, non-comment line in attacker section with the IP
+            if stripped and not stripped.startswith("#"):
+                new_lines.append(str(attacker_host))
+                replaced = True
+                continue
+        new_lines.append(line)
+    # If attacker section was found but had no host line, append it
+    if in_attacker_section and not replaced:
+        new_lines.append(str(attacker_host))
+    inventory.write_text("\n".join(new_lines) + "\n")
+
     print("Running attacker setup...")
     run_command([
-        "ansible-playbook", str(playbook), "-i", str(inventory)
+        "ansible-playbook", str(playbook), "-i", str(inventory),
+        "-e", 'ansible_ssh_common_args="-o StrictHostKeyChecking=no"'
     ], cwd=att_dir)
 
 def setup_logging(attacker_host: str, attacker_user: str, ssh_key_path: Path):
-    """SSH into attacker and run logging/main.yml that resides ON the attacker host.
-    """
-    config = load_config()
-    remote_repo_path = config.get("remote_repo_path", "~/security-sandbox")  # assumption if not provided
-    remote_playbook = f"{remote_repo_path}/logging/main.yml"
-    remote_inventory = f"{remote_repo_path}/logging/logging_server.ini"
-    print(f"Remote executing playbook on attacker host {attacker_host}...")
-    remote_cmd = (
-        f"ansible-playbook {remote_playbook} -i {remote_inventory} "
-        f"--private-key {remote_repo_path}/ssh_keys/{ssh_key_path.name} -u {attacker_user}"
-    )
-    run_remote_ssh(ssh_key_path, attacker_user, attacker_host, remote_cmd)
+    """Run logging playbook locally. Pass ansible_ssh_common_args to use attacker as jump host."""
+    log_dir = Path(__file__).parent / "logging"
+    playbook = log_dir / "main.yml"
+    inventory = log_dir / "logging_server.ini"
+    proxy = f'\'-o StrictHostKeyChecking=no -o ProxyCommand="ssh -i {ssh_key_path} -o StrictHostKeyChecking=no {attacker_user}@{attacker_host} -W %h:%p"\''
+    print(f"Running logging setup locally (inventory: {inventory}) using attacker {attacker_host} as jump host")
+    run_command([
+        "ansible-playbook",
+        str(playbook),
+        "-i",
+        str(inventory),
+        "-e",
+        f'ansible_ssh_common_args={proxy}'
+    ], cwd=log_dir)
 
 def setup_target(os_name: str, attacker_host: str, attacker_user: str, ssh_key_path: Path):
-    """SSH into attacker and run target/{os}/main.yml that resides ON the attacker host.
-    """
-    config = load_config()
-    remote_repo_path = config.get("remote_repo_path", "~/security-sandbox")
-    remote_playbook = f"{remote_repo_path}/target/{os_name}/main.yml"
-    remote_inventory = f"{remote_repo_path}/target/{os_name}/target_{os_name}.ini"
-    print(f"[Target] Remote executing target/{os_name}/main.yml on attacker host {attacker_host} ...")
-    remote_cmd = (
-        f"ansible-playbook {remote_playbook} -i {remote_inventory} "
-        f"--private-key {remote_repo_path}/ssh_keys/{ssh_key_path.name} -u {attacker_user}"
-    )
-    run_remote_ssh(ssh_key_path, attacker_user, attacker_host, remote_cmd)
+    """Copy target files and ssh_keys to attacker, then run ansible-playbook on attacker."""
+    log_dir = Path(__file__).parent / "target"
+    playbook = log_dir / "main.yml"
+    inventory = log_dir / f"target_{os_name}.ini"
+    print(f"Running target ({os_name}) setup on attacker...")
+    proxy = f'\'-o StrictHostKeyChecking=no -o ProxyCommand="ssh -i {ssh_key_path} -o StrictHostKeyChecking=no {attacker_user}@{attacker_host} -W %h:%p"\''
+    run_command([
+        "ansible-playbook",
+        str(playbook),
+        "-i",
+        str(inventory),
+        "-e",
+        f"ansible_ssh_common_args={proxy}"
+    ], cwd=log_dir)
 
 def run_remote_ssh(key_path: Path, user: str, host: str, remote_command: str):
     """Execute a remote shell command on attacker via SSH.
@@ -193,7 +173,9 @@ def main():
         sys.exit(0)
 
     args = parser.parse_args()
+    aws_arch_dir = Path(__file__).parent / "aws_architecture"
 
+    print("Loading environment variables...")
     env_path = Path(__file__).parent / ".env"
     if not env_path.exists():
         env_path = Path(__file__).parent.parent / ".env"
@@ -205,85 +187,27 @@ def main():
     os_name = config.get("target_machine_os", "linux")
     ssh_keys_dir = Path(config.get("ssh_keys_dir", "./ssh_keys"))
     user_to_attacker_key = ssh_keys_dir / config["user_to_attacker_ssh_key"]["name"]
-    internal_lab_key = ssh_keys_dir / config["internal_lab_ssh_key"]["name"]
-
-    # For demo, attacker host/user are hardcoded; in real use, fetch from Terraform output or config
-    attacker_host = get_attacker_ip() or "attacker_host_ip"  # TODO: ensure terraform outputs or config.json contains attacker_ip
-    attacker_user = config.get("attacker_ssh_user", "ec2-user")  # optional config override
 
     if args.update_ip:
-        # Determine which IP to use
-        if args.update_ip == 'auto':
-            # Auto-detect IP
+        if args.update_ip in [None, 'auto']:
             ip = get_public_ip()
             if not ip:
                 print("Public IP lookup failed; cannot proceed with --update-ip.")
                 return
             print(f"Auto-detected public IP: {ip}")
         else:
-            # User provided an IP
             ip = args.update_ip
-            print(f"Using provided IP: {ip}")
-            
-            # Query web services to compare
-            detected_ip = get_public_ip()
-            if detected_ip and detected_ip != ip:
-                print(f"\n⚠️  WARNING: Provided IP ({ip}) differs from auto-detected IP ({detected_ip})")
-                print("    Continuing with provided IP...\n")
-            elif detected_ip:
-                print(f"✓ Provided IP matches auto-detected IP")
-        
-        # Update config.json
-        update_config(DEFAULT_CONFIG_PATH, {"ssh_client_ip": ip})
-        
-        # Run targeted Terraform apply to update only the security group
-        terraform_ok = ensure_installed(
-            "terraform",
-            "Please install Terraform to update the security group."
-        )
-        if not terraform_ok:
-            print("Terraform is required for security group update. Exiting.")
-            return
-        
-        aws_arch_dir = Path(__file__).parent / "aws_architecture"
-        if not aws_arch_dir.exists():
-            print(f"Terraform directory not found: {aws_arch_dir}")
-            return
-        
-        print("\n--> Running targeted Terraform apply to update attacker_machine_sg only...")
-        print("    This will update the security group without redeploying instances.\n")
-        
+            print(f"Using provided IP: {ip} instead of auto-detect.")
+        update_config(DEFAULT_CONFIG_PATH, {"user_ip": ip})
         run_command(
             ["terraform", "apply", "-target=aws_security_group.attacker_machine_sg", "-auto-approve"],
             cwd=aws_arch_dir
         )
-        
-        print("\n✓ Security group updated successfully!")
-        print("  Config.json updated with new IP")
-        print("  Attacker security group SSH rule updated via Terraform")
-        print("  No instance redeployment required")
+        print("Config.json and environment successfully updated with new IP")
         return
 
     os.environ["TF_VAR_availability_zone"] = os.environ.get("AWS_DEFAULT_REGION", "us-east-1a")
-
-    terraform_ok = ensure_installed(
-        "terraform",
-        "Please install Terraform before running this deployment tool."
-    )
-    if not terraform_ok:
-        print("Terraform is required. Install it and re-run the script.")
-        sys.exit(1)
-
-    aws_arch_dir = Path(__file__).parent / "aws_architecture"
-    if not aws_arch_dir.exists():
-        print(f"Terraform directory not found: {aws_arch_dir}")
-        sys.exit(1)
-
-    terraform_state_dir = aws_arch_dir / ".terraform"
-    if terraform_state_dir.exists():
-        print("Terraform already initialized, skipping 'terraform init'.")
-    else:
-        run_command(["terraform", "init"], cwd=aws_arch_dir)
+    run_command(["terraform", "init"], cwd=aws_arch_dir)
 
     if args.reset:
         reset_all(aws_arch_dir)
@@ -300,37 +224,17 @@ def main():
             update_config(DEFAULT_CONFIG_PATH, {"target_machine_os": args.target})
 
         run_command(["terraform", "apply", "-auto-approve"], cwd=aws_arch_dir)
-
-        print("\nFetching Terraform outputs...")
-        tf_output = subprocess.run(
-            ["terraform", "output", "-json"],
-            cwd=aws_arch_dir,
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        print(f"Terraform Output:\n{tf_output.stdout}")
-
+        print("Terraform apply complete.")
         if not args.no_ansible:
-            ansible_ok = ensure_installed(
-                "ansible-playbook",
-                "Please install Ansible before running the deployment python file."
-            )
-            if not ansible_ok:
-                print("Ansible not available; skipping playbook run.")
-            else:
-                # Modular setup calls
-                if args.setup in [None, "all"]:
-                    setup_attacker()
-                    setup_logging(attacker_host, attacker_user, user_to_attacker_key)
-                    setup_target(os_name, attacker_host, attacker_user, internal_lab_key)
-                elif args.setup == "attacker":
-                    setup_attacker()
-                elif args.setup == "logging":
-                    setup_logging(attacker_host, attacker_user, user_to_attacker_key)
-                elif args.setup == "target":
-                    setup_target(os_name, attacker_host, attacker_user, internal_lab_key)
-
+            attacker_host = get_attacker_ip() 
+            complete_setup = args.setup in [None, "all"]
+            if complete_setup or args.setup == "attacker":
+                setup_attacker()
+            if complete_setup or args.setup == "logging": 
+                setup_logging(attacker_host, "ec2-user", user_to_attacker_key) # user_to_attacker_key
+            if complete_setup or args.setup == "target":
+                setup_target(os_name, attacker_host, "ec2-user", user_to_attacker_key)
+            
         print("\nDeployment complete.")
     else:
         print("No action specified. Use --apply, --destroy, --reset, or --update-ip.")

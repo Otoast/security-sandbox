@@ -88,6 +88,10 @@ resource "aws_ec2_host" "mac_host" {
   count               = local.selected_ami == data.aws_ami.macos.id ? 1 : 0
 }
 
+output "attacker_public_ip" {
+  description = "Public IP address of the attacker EC2 instance"
+  value       = aws_instance.attacker_machine.public_ip
+}
 
 
 

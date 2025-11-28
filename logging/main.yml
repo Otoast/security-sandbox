@@ -516,7 +516,23 @@
     ############################################################################
     # PHASE 5: DISPLAY CREDENTIALS
     ############################################################################
-
+    - name: Save Fleet credentials to local file
+      copy:
+        content: |
+          # Fleet Server Credentials for Target Machine Enrollment
+          # Generated: {{ ansible_date_time.iso8601 }}
+          # Control Server: {{ ansible_default_ipv4.address }}
+          
+          fleet_url: "http://{{ ansible_default_ipv4.address }}:8220"
+          fleet_enrollment_token: "{{ fleet_enrollment_token }}"
+          elasticsearch_host: "http://{{ ansible_default_ipv4.address }}:9200"
+          elastic_username: "elastic"
+          elastic_password: "{{ elastic_password }}"
+          kibana_host: "http://{{ ansible_default_ipv4.address }}:5601"
+        dest: "{{ playbook_dir }}/.fleet_credentials.yml"
+      delegate_to: localhost
+      become: no
+      
     - name: Display deployment summary
       debug:
         msg: |
