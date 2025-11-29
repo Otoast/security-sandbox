@@ -4,7 +4,7 @@ resource "aws_instance" "attacker_machine" {
     instance_type = "m7i-flex.large"
 
     private_ip = local.config.attacker_private_ip
-    security_groups = [ aws_security_group.attacker_machine_sg.id ]
+    vpc_security_group_ids = [ aws_security_group.attacker_machine_sg.id ]
     key_name = aws_key_pair.user_attacker_key.key_name
     availability_zone = local.config.availability_zone
     associate_public_ip_address = true
@@ -25,7 +25,7 @@ resource "aws_instance" "logging_machine" {
     instance_type = "m7i-flex.large"
 
     private_ip = local.config.logging_private_ip
-    security_groups = [ aws_security_group.logging_machine_sg.id ]
+    vpc_security_group_ids = [ aws_security_group.logging_machine_sg.id ]
     key_name = aws_key_pair.internal_lab_key.key_name
     availability_zone = local.config.availability_zone
     subnet_id = aws_subnet.lab_private_subnet.id
@@ -46,7 +46,7 @@ resource "aws_instance" "target_machine" {
     instance_type = "m7i-flex.large"
 
     private_ip = local.config.target_private_ip
-    security_groups = [ aws_security_group.target_machine_sg.id ]
+    vpc_security_group_ids = [ aws_security_group.target_machine_sg.id ]
     key_name = aws_key_pair.internal_lab_key.key_name
     availability_zone = local.config.availability_zone
     subnet_id = aws_subnet.lab_private_subnet.id

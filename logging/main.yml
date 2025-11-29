@@ -1,9 +1,10 @@
-
+---
 - name: Control Machine Setup - ELK Stack
   hosts: logging_server
   become: yes
+  gather_facts: yes
   vars:
-    elastic_version: "8.11.0"
+    elastic_version: "8.17.0"
     elasticsearch_dir: "/opt/elasticsearch-{{ elastic_version }}"
     kibana_dir: "/opt/kibana-{{ elastic_version }}"
     # Download cache on Ansible controller (attacker machine)
@@ -223,9 +224,8 @@
           elasticsearch.hosts: ["http://localhost:9200"]
           elasticsearch.serviceAccountToken: "{{ kibana_service_token.json.token.value }}"
           
-          # Fleet air-gapped/offline configuration
+          # Fleet air-gapped configuration (requires 8.13.0+)
           xpack.fleet.isAirGapped: true
-          xpack.fleet.registryProxyUrl: ""
           
           # Pre-configure Fleet Server host (avoids registry lookup)
           xpack.fleet.agents.fleet_server.hosts: ["http://localhost:8220"]
@@ -285,10 +285,10 @@
       systemd:
         daemon_reload: yes
 
-    - name: Restart Kibana service
+    - name: Start Kibana service
       systemd:
         name: kibana
-        state: restarted
+        state: started
         enabled: yes
       
     - name: Wait for Kibana to be ready
@@ -329,14 +329,19 @@
         headers:
           kbn-xsrf: "true"
           Content-Type: "application/json"
-        timeout: 120
-        status_code: [200, 409]
+        timeout: 300
+        status_code: [200, 409, 500]
         return_content: yes
       register: fleet_setup
       failed_when: false
-      retries: 5
-      delay: 15
+      retries: 10
+      delay: 30
       until: fleet_setup.status in [200, 409]
+
+    - name: Debug Fleet setup response
+      debug:
+        msg: "Fleet setup status: {{ fleet_setup.status | default('unknown') }}, response: {{ fleet_setup.json | default({}) }}"
+      when: fleet_setup is defined
 
     - name: Wait for Fleet to initialize
       pause:
@@ -458,6 +463,11 @@
         remote_src: yes
         creates: "/opt/elastic-agent-{{ elastic_version }}-linux-x86_64"
       
+    - name: Check if Fleet Server is already installed
+      stat:
+        path: /opt/Elastic/Agent/elastic-agent
+      register: fleet_agent_installed
+
     - name: Install Fleet Server
       shell: |
         cd /opt/elastic-agent-{{ elastic_version }}-linux-x86_64
@@ -466,10 +476,11 @@
           --fleet-server-es=http://localhost:9200 \
           --fleet-server-service-token={{ fleet_service_token.json.token.value }} \
           --fleet-server-policy={{ fleet_server_policy_id }} \
+          --fleet-server-host=0.0.0.0 \
+          --fleet-server-port=8220 \
           --fleet-server-insecure-http \
           --non-interactive
-      args:
-        creates: /opt/Elastic/Agent/elastic-agent
+      when: not fleet_agent_installed.stat.exists
       
     - name: Wait for Fleet Server to be ready
       wait_for:
@@ -533,7 +544,24 @@
     - name: Set enrollment token from created key if created
       set_fact:
         fleet_enrollment_token: "{{ fleet_enrollment_response.json.item.api_key }}"
-      when: fleet_enrollment_response is defined and fleet_enrollment_response.json.item.api_key is defined
+      when: 
+        - fleet_enrollment_response is defined
+        - fleet_enrollment_response.json is defined
+        - fleet_enrollment_response.json.item is defined
+        - fleet_enrollment_response.json.item.api_key is defined
+
+    - name: Get any existing enrollment key if token still empty
+      set_fact:
+        fleet_enrollment_token: "{{ (existing_enrollment_keys.json['list'] | first).api_key }}"
+      when:
+        - fleet_enrollment_token == ""
+        - existing_enrollment_keys.json['list'] is defined
+        - existing_enrollment_keys.json['list'] | length > 0
+
+    - name: Warn if no enrollment token available
+      debug:
+        msg: "WARNING: No Fleet enrollment token was created or found. You may need to create one manually in Kibana."
+      when: fleet_enrollment_token == ""
 
     ############################################################################
     # PHASE 5: DISPLAY CREDENTIALS

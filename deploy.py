@@ -130,7 +130,7 @@ def setup_logging(attacker_host: str, attacker_user: str, ssh_key_path: Path):
 
 def setup_target(os_name: str, attacker_host: str, attacker_user: str, ssh_key_path: Path):
     """Copy target files and ssh_keys to attacker, then run ansible-playbook on attacker."""
-    target_dir = Path(__file__).parent / "target"
+    target_dir = Path(__file__).parent / "target" / os_name
     playbook = target_dir / "main.yml"
     inventory = target_dir / f"target_{os_name}.ini"
     print(f"Running target ({os_name}) setup on attacker...")
