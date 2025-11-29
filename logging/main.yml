@@ -155,6 +155,9 @@
       become: no
       run_once: true
 
+    # Note: Fleet packages are bundled with Kibana when using xpack.fleet.isAirGapped: true
+    # No need to download from epr.elastic.co
+
     - name: Check if Kibana service token exists
       uri:
         url: "http://localhost:9200/_security/service/elastic/kibana/credential"
@@ -208,6 +211,9 @@
         group: kibana
         recurse: yes
 
+    # Fleet packages are bundled with Kibana when using xpack.fleet.isAirGapped: true
+    # No need to manually copy/extract packages
+
     - name: Configure Kibana
       blockinfile:
         path: "{{ kibana_dir }}/config/kibana.yml"
@@ -216,6 +222,45 @@
           server.port: 5601
           elasticsearch.hosts: ["http://localhost:9200"]
           elasticsearch.serviceAccountToken: "{{ kibana_service_token.json.token.value }}"
+          
+          # Fleet air-gapped/offline configuration
+          xpack.fleet.isAirGapped: true
+          xpack.fleet.registryProxyUrl: ""
+          
+          # Pre-configure Fleet Server host (avoids registry lookup)
+          xpack.fleet.agents.fleet_server.hosts: ["http://localhost:8220"]
+          
+          # Pre-configure Elasticsearch output
+          xpack.fleet.outputs:
+            - id: fleet-default-output
+              name: default
+              type: elasticsearch
+              hosts: ["http://localhost:9200"]
+              is_default: true
+              is_default_monitoring: true
+          
+          # Pre-configure Fleet Server policy with bundled packages
+          xpack.fleet.packages:
+            - name: fleet_server
+              version: latest
+            - name: elastic_agent
+              version: latest
+            - name: system
+              version: latest
+          
+          xpack.fleet.agentPolicies:
+            - name: Fleet Server policy
+              id: fleet-server-policy
+              namespace: default
+              monitoring_enabled:
+                - logs
+                - metrics
+              is_default_fleet_server: true
+              package_policies:
+                - name: fleet_server-1
+                  id: fleet-server-1
+                  package:
+                    name: fleet_server
         marker: "# {mark} ANSIBLE MANAGED BLOCK"
 
     - name: Create Kibana systemd service
@@ -284,18 +329,21 @@
         headers:
           kbn-xsrf: "true"
           Content-Type: "application/json"
-        timeout: "{{ kibana_request_timeout }}"
-        status_code: 200
+        timeout: 120
+        status_code: [200, 409]
         return_content: yes
       register: fleet_setup
       failed_when: false
+      retries: 5
+      delay: 15
+      until: fleet_setup.status in [200, 409]
 
     - name: Wait for Fleet to initialize
       pause:
-        seconds: 10
-        prompt: "Waiting for Fleet to fully initialize..."
+        seconds: 15
+        prompt: "Waiting for Fleet to fully initialize with preconfigured policies..."
 
-    - name: Get Fleet Server policy
+    - name: Get Fleet Server policy (preconfigured via kibana.yml)
       uri:
         url: "{{ kibana_base_url }}/api/fleet/agent_policies"
         method: GET
@@ -312,22 +360,21 @@
       delay: 10
       until: fleet_policies.status == 200
 
-    - name: Set default policy facts
+    - name: Set Fleet Server policy ID (using preconfigured ID)
       set_fact:
-        fleet_server_policy_exists: false
-        fleet_server_policy_id: ""
+        fleet_server_policy_id: "fleet-server-policy"
 
-    - name: Find Fleet Server policy
+    - name: Verify Fleet Server policy exists
       set_fact:
-        fleet_server_policy_exists: true
-        fleet_server_policy_id: "{{ item.id }}"
-      loop: "{{ fleet_policies.json['items'] | default([]) }}"
-      when: 
-        - fleet_policies.json['items'] is defined
-        - item.name is defined
-        - item.name == 'Fleet Server policy'
+        fleet_server_policy_exists: "{{ fleet_policies.json['items'] | selectattr('id', 'equalto', 'fleet-server-policy') | list | length > 0 }}"
 
-    - name: Create Fleet Server policy if it doesn't exist
+    - name: Debug Fleet policy status
+      debug:
+        msg: "Fleet Server policy exists: {{ fleet_server_policy_exists }}, Policy ID: {{ fleet_server_policy_id }}"
+
+    # Policy and integration are preconfigured in kibana.yml via xpack.fleet.agentPolicies
+    # Only create if the preconfigured policy didn't get created (fallback)
+    - name: Create Fleet Server policy if preconfigured one doesn't exist
       uri:
         url: "{{ kibana_base_url }}/api/fleet/agent_policies"
         method: POST
@@ -339,9 +386,10 @@
           Content-Type: "application/json"
         body_format: json
         body:
+          id: "fleet-server-policy"
           name: "Fleet Server policy"
           namespace: "default"
-          description: "Fleet Server policy"
+          description: "Fleet Server policy (created by Ansible)"
           monitoring_enabled:
             - logs
             - metrics
@@ -352,53 +400,8 @@
       register: fleet_server_policy_created
       failed_when: false
       when: not fleet_server_policy_exists
-      retries: "{{ fleet_api_retries }}"
-      delay: "{{ fleet_api_delay }}"
-      until: fleet_server_policy_created.status in [200, 201, 409]
-
-    - name: Get Fleet Server policy ID
-      set_fact:
-        fleet_server_policy_id: "{{ (fleet_policies.json['items'] | selectattr('name', 'equalto', 'Fleet Server policy') | list | first).id if fleet_server_policy_exists else fleet_server_policy_created.json.item.id }}"
-
-    - name: Add Fleet Server integration to policy
-      uri:
-        url: "{{ kibana_base_url }}/api/fleet/package_policies"
-        method: POST
-        user: elastic
-        password: "{{ elastic_password }}"
-        force_basic_auth: yes
-        headers:
-          kbn-xsrf: "true"
-          Content-Type: "application/json"
-        body_format: json
-        body:
-          name: "fleet_server-1"
-          namespace: "default"
-          policy_id: "{{ fleet_server_policy_id }}"
-          enabled: true
-          package:
-            name: "fleet_server"
-            version: "1.5.0"
-          inputs:
-            - type: "fleet-server"
-              enabled: true
-              streams: []
-              vars:
-                host:
-                  value: "0.0.0.0"
-                  type: "text"
-                port:
-                  value: 8220
-                  type: "integer"
-                custom: ""
-        status_code: [200, 201, 409]
-        return_content: yes
-        timeout: "{{ kibana_request_timeout }}"
-      register: fleet_server_integration
-      failed_when: false
-      retries: "{{ fleet_api_retries }}"
-      delay: "{{ fleet_api_delay }}"
-      until: fleet_server_integration.status in [200, 201, 409]
+      retries: 3
+      delay: 10
 
     ############################################################################
     # PHASE 4: FLEET SERVER INSTALLATION
