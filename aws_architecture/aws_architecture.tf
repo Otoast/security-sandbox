@@ -79,6 +79,17 @@ resource "aws_security_group" "attacker_machine_sg" {
   vpc_id = aws_vpc.lab_vpc.id
 }
 
+# Attacker → Internet (for package updates, Atomic Red Team, tools)
+resource "aws_security_group_rule" "attacker_to_internet" {
+  type              = "egress"
+  from_port         = 0
+  to_port           = 0
+  protocol          = "-1"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.attacker_machine_sg.id
+  description       = "Allow outbound internet for tools/packages"
+}
+
 resource "aws_security_group" "target_machine_sg" {
   name   = "target_machine_sg"
   vpc_id = aws_vpc.lab_vpc.id
