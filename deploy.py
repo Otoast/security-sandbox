@@ -311,45 +311,74 @@ def load_snapshots_into_env():
     else:
         print("   Terraform will use these custom AMIs for the next apply.\n")
 
-
 # Modular setup functions
 def setup_attacker():
     """Run attacker/main.yml playbook with attacker/attacker.ini inventory."""
     att_dir = Path(__file__).parent / "attacker"
     playbook = att_dir / "main.yml"
-    inventory = att_dir / "attacker.ini"
+    inventory = att_dir / "inventory.ini"
+    attacker_host = get_attacker_ip()
+    lines = inventory.read_text().splitlines()
+    new_lines = []
+    in_attacker_section = False
+    replaced = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            # entering a (new) section
+            in_attacker_section = (stripped.lower() == "[attacker]")
+            new_lines.append(line)
+            continue
+        if in_attacker_section and not replaced:
+            # replace the first non-empty, non-comment line in attacker section with the IP
+            if stripped and not stripped.startswith("#"):
+                new_lines.append(str(attacker_host))
+                replaced = True
+                continue
+        new_lines.append(line)
+    # If attacker section was found but had no host line, append it
+    if in_attacker_section and not replaced:
+        new_lines.append(str(attacker_host))
+    inventory.write_text("\n".join(new_lines) + "\n")
+
     print("Running attacker setup...")
     run_command([
-        "ansible-playbook", str(playbook), "-i", str(inventory)
-    ], cwd=att_dir)
+        "ansible-playbook", str(playbook), "-i", str(inventory),
+        "-e", 'ansible_ssh_common_args="-o StrictHostKeyChecking=no"'
+    ], cwd=Path(__file__).parent )
 
 def setup_logging(attacker_host: str, attacker_user: str, ssh_key_path: Path):
-    """SSH into attacker and run logging/main.yml that resides ON the attacker host.
-    """
-    config = load_config()
-    remote_repo_path = config.get("remote_repo_path", "~/security-sandbox")  # assumption if not provided
-    remote_playbook = f"{remote_repo_path}/logging/main.yml"
-    remote_inventory = f"{remote_repo_path}/logging/logging_server.ini"
-    print(f"Remote executing playbook on attacker host {attacker_host}...")
-    remote_cmd = (
-        f"ansible-playbook {remote_playbook} -i {remote_inventory} "
-        f"--private-key {remote_repo_path}/ssh_keys/{ssh_key_path.name} -u {attacker_user}"
-    )
-    run_remote_ssh(ssh_key_path, attacker_user, attacker_host, remote_cmd)
+    """Run logging playbook locally. Pass ansible_ssh_common_args to use attacker as jump host."""
+    log_dir = Path(__file__).parent / "logging"
+    playbook = log_dir / "main.yml"
+    inventory = log_dir / "logging_server.ini"
+
+    proxy = f'-o StrictHostKeyChecking=no -o ProxyCommand="ssh -o StrictHostKeyChecking=no -W %h:%p -q {attacker_user}@{attacker_host} -i {ssh_key_path} "'
+    print(f"Running logging setup locally (inventory: {inventory}) using attacker {attacker_host} as jump host")
+    run_command([
+        "ansible-playbook",
+        str(playbook),
+        "-i",
+        str(inventory),
+        "-e",
+        f"ansible_ssh_common_args='{proxy}'"
+    ], cwd=Path(__file__).parent )
 
 def setup_target(os_name: str, attacker_host: str, attacker_user: str, ssh_key_path: Path):
-    """SSH into attacker and run target/{os}/main.yml that resides ON the attacker host.
-    """
-    config = load_config()
-    remote_repo_path = config.get("remote_repo_path", "~/security-sandbox")
-    remote_playbook = f"{remote_repo_path}/target/{os_name}/main.yml"
-    remote_inventory = f"{remote_repo_path}/target/{os_name}/target_{os_name}.ini"
-    print(f"[Target] Remote executing target/{os_name}/main.yml on attacker host {attacker_host} ...")
-    remote_cmd = (
-        f"ansible-playbook {remote_playbook} -i {remote_inventory} "
-        f"--private-key {remote_repo_path}/ssh_keys/{ssh_key_path.name} -u {attacker_user}"
-    )
-    run_remote_ssh(ssh_key_path, attacker_user, attacker_host, remote_cmd)
+    """Copy target files and ssh_keys to attacker, then run ansible-playbook on attacker."""
+    target_dir = Path(__file__).parent / "target" / os_name
+    playbook = target_dir / "main.yml"
+    inventory = target_dir / f"target_{os_name}.ini"
+    print(f"Running target ({os_name}) setup on attacker...")
+    proxy = f'-o StrictHostKeyChecking=no -o ProxyCommand="ssh -o StrictHostKeyChecking=no -W %h:%p -q {attacker_user}@{attacker_host} -i {ssh_key_path} "'
+    run_command([
+        "ansible-playbook",
+        str(playbook),
+        "-i",
+        str(inventory),
+        "-e",
+        f"ansible_ssh_common_args='{proxy}'"
+    ], cwd=Path(__file__).parent )
 
 def run_remote_ssh(key_path: Path, user: str, host: str, remote_command: str):
     """Execute a remote shell command on attacker via SSH.
@@ -375,8 +404,6 @@ def main():
     parser.add_argument("--target", choices=['macos', 'windows', 'linux'], help="Set target_machine_os in config.json (works with --apply)")
     parser.add_argument("--no-ansible", action="store_true", help="Skip running the Ansible playbook")
     parser.add_argument("--setup", choices=["attacker", "logging", "target", "all"], help="Run only a specific setup step (remote SSH execution for logging/target)")
-    
-   
     parser.add_argument("--create-snapshot", choices=['attacker', 'target', 'logging', 'all'], 
                     help="Create an AMI snapshot of the specified running instance")
 
