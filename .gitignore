@@ -8,4 +8,5 @@ env
 
 *.tfvars
 *.tfvars.json
-venv/*
+
+
