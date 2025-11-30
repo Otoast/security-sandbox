@@ -2,6 +2,24 @@ locals {
   config = jsondecode(file("${path.module}/../config.json"))
 }
 
+variable "attacker_custom_ami" {
+  description = "Custom AMI ID for attacker (injected by deploy.py if snapshot exists)"
+  type        = string
+  default     = null
+}
+
+variable "target_custom_ami" {
+  description = "Custom AMI ID for target (injected by deploy.py if snapshot exists)"
+  type        = string
+  default     = null
+}
+
+variable "logging_custom_ami" {
+  description = "Custom AMI ID for logging machine (injected by deploy.py if snapshot exists)"
+  type        = string
+  default     = null
+}
+
 locals {
   pub_key_dir  = "../${local.config.ssh_keys_dir}"
   
@@ -11,17 +29,22 @@ locals {
   internal_lab_key_info = local.config.internal_lab_ssh_key
   internal_lab_key_path = "${local.pub_key_dir}/${local.internal_lab_key_info.name}.pub"
 
-  # Generate a stable per-user suffix using MD5 so key names stay unique per IAM user.
   user_identifier = substr(md5(local.config.user), 0, 8)
 
   user_attacker_key_aws_name = "${local.user_attacker_key_info.name}-${local.user_identifier}"
   internal_lab_key_aws_name  = "${local.internal_lab_key_info.name}-${local.user_identifier}"
 
-  selected_ami = lookup({
+  default_target_ami = lookup({
     linux   = data.aws_ami.linux.id,
     windows = data.aws_ami.windows.id,
     macos   = data.aws_ami.macos.id
   }, local.config.target_machine_os, data.aws_ami.linux.id)
+
+  final_attacker_ami = var.attacker_custom_ami != null ? var.attacker_custom_ami : data.aws_ami.linux.id
+  
+  final_target_ami   = var.target_custom_ami != null ? var.target_custom_ami : local.default_target_ami
+  
+  final_logging_ami  = var.logging_custom_ami != null ? var.logging_custom_ami : data.aws_ami.linux.id
 }
 
 variable "availability_zone" {
@@ -82,10 +105,10 @@ data "aws_ami" "macos" {
 }
 
 resource "aws_ec2_host" "mac_host" {
-  instance_type       = "mac2-m2.metal"
-  availability_zone  = var.availability_zone
-  host_recovery       = "on"
-  count               = local.selected_ami == data.aws_ami.macos.id ? 1 : 0
+  instance_type     = "mac2-m2.metal"
+  availability_zone = var.availability_zone
+  host_recovery     = "on"
+  count             = local.config.target_machine_os == "macos" ? 1 : 0
 }
 
 output "attacker_public_ip" {
