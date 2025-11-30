@@ -50,6 +50,7 @@ resource "aws_instance" "target_machine" {
     availability_zone = local.config.availability_zone
     subnet_id = aws_subnet.lab_private_subnet.id
     host_id   = local.config.target_machine_os == "macos" ? aws_ec2_host.mac_host[0].id : null
+    user_data = local.config.target_machine_os == "windows" ? file("../target/windows/user_data_windows") : null 
     tags = {
         Name = "target_machine"
     }

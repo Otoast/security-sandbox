@@ -60,12 +60,6 @@ def update_config(config_path: Path, updates: dict):
     print(f"Updated {config_path} with: {updates}")
 
 
-def reset_all(terraform_dir: Path):
-    print("--> Resetting all EC2 instances (attacker, target, logging_machine)")
-    run_command(["terraform", "destroy", "-auto-approve"], cwd=terraform_dir)
-    run_command(["terraform", "apply", "-auto-approve"], cwd=terraform_dir)
-    print("All instances reset complete.")
-
 def load_config():
     """Load config.json and return dict; empty dict on failure."""
     try:
@@ -396,7 +390,7 @@ def main():
     )
     parser.add_argument("--apply", action="store_true", help="Apply (deploy) Terraform configuration")
     parser.add_argument("--destroy", action="store_true", help="Destroy all Terraform-managed resources")
-    parser.add_argument("--reset", action="store_true", help="Destroy and redeploy all EC2 instances")
+    parser.add_argument("--connect", action="store_true", help="Open an interactive SSH shell to ec2-user@<attacker-ip> using the user_to_attacker_key")
     parser.add_argument("--update-ip", nargs='?', const='auto', metavar='IP', help="Update SSH client IP in config.json and attacker security group via targeted Terraform apply. Optionally provide IP address (default: auto-detect)")
     parser.add_argument("--target", choices=['macos', 'windows', 'linux'], help="Set target_machine_os in config.json (works with --apply)")
     parser.add_argument("--no-ansible", action="store_true", help="Skip running the Ansible playbook")
@@ -443,7 +437,22 @@ def main():
         return
 
     os.environ["TF_VAR_availability_zone"] = os.environ.get("AWS_DEFAULT_REGION", "us-east-1a")
-    run_command(["terraform", "init"], cwd=aws_arch_dir)
+
+    # If user only wants to connect to the attacker instance, fetch its IP and open an interactive shell
+    if args.connect:
+        attacker_host = get_attacker_ip()
+        if not attacker_host:
+            print("Could not determine attacker IP (terraform outputs missing and config.json fallback empty).")
+            return
+        if not user_to_attacker_key.exists():
+            print(f"SSH key not found: {user_to_attacker_key}. Ensure the key file exists relative to repo root.")
+            return
+        print(f"Opening SSH session to ec2-user@{attacker_host} using key {user_to_attacker_key}")
+        try:
+            run_command(["ssh", "-o", "StrictHostKeyChecking=no", "-i", str(user_to_attacker_key), f"ec2-user@{attacker_host}"], cwd=Path(__file__).parent)
+        except subprocess.CalledProcessError as e:
+            print(f"SSH command failed: {e}")
+        return
 
     if args.create_snapshot:
         if args.create_snapshot == 'all':
@@ -454,12 +463,9 @@ def main():
             create_snapshot(args.create_snapshot, aws_arch_dir)
         return
 
-    if args.reset:
-        reset_all(aws_arch_dir)
-        return
-
     if args.destroy:
         print("--> Running terraform destroy (auto-approved)")
+        run_command(["terraform", "init"], cwd=aws_arch_dir)
         run_command(["terraform", "destroy", "-auto-approve"], cwd=aws_arch_dir)
         print("Terraform destroy complete.")
         return
@@ -469,7 +475,7 @@ def main():
             update_config(DEFAULT_CONFIG_PATH, {"target_machine_os": args.target})
 
         load_snapshots_into_env()
-
+        run_command(["terraform", "init"], cwd=aws_arch_dir)
         run_command(["terraform", "apply", "-auto-approve"], cwd=aws_arch_dir)
         print("Terraform apply complete.")
         if not args.no_ansible:
@@ -483,8 +489,22 @@ def main():
                 setup_target(os_name, attacker_host, "ec2-user", user_to_attacker_key)
             
         print("\nDeployment complete.")
+
+        # Display important information and next steps
+        attacker_ip = get_attacker_ip()
+        print("\n================ Deployment Summary ================")
+        print(f"Attacker Public IP: {attacker_ip if attacker_ip else 'Not available'}")
+        print("\nNext Steps:")
+        print("1. Connect to the attacker instance:")
+        print("   Use the '--connect' command: \n   python deploy.py --connect")
+        print("   (Alternatively, use: ssh -i <path-to-key> ec2-user@<attacker-ip>)")
+        print("2. Access Fleet server (if applicable): \n   Use the credentials in 'logging/fleet_credentials.yml'.")
+        print("3. Create snapshots of instances for backup:")
+        print("   Use the '--create-snapshot' command: \n   python deploy.py --create-snapshot <role>\n   (Roles: attacker, target, logging, or all)")
+        print("4. Review logs and ensure all services are running as expected.")
+        print("===================================================\n")
     else:
-        print("No action specified. Use --apply, --destroy, --reset, or --update-ip.")
+        print("No valid action specified.")
         parser.print_help()
 
 

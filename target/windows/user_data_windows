@@ -1,0 +1,6 @@
+<powershell>
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$file = "./ConfigureRemotingForAnsible.ps1"
+powershell.exe -ExecutionPolicy ByPass -File $file
+</powershell>
+<persist>true</persist>
