@@ -185,21 +185,18 @@ def load_config():
 
 
 def get_attacker_ip():
-    """Attempt to retrieve attacker public IP from Terraform outputs; fallback to config.json.
-
-    Requires that terraform outputs define one of: attacker_ip, attacker_public_ip, attacker_machine_ip
-    Example Terraform output block to add (if missing):
-        output "attacker_public_ip" { value = aws_instance.attacker_machine.public_ip }
-    """
+    """Attempt to retrieve attacker public IP from Terraform outputs; fallback to config.json."""
     aws_arch_dir = Path(__file__).parent / "aws_architecture"
     try:
-        result = subprocess.run([
-            "terraform", "output", "-json"
-        ], cwd=aws_arch_dir, capture_output=True, text=True, check=True)
+        result = subprocess.run(["terraform", "output", "-json"], cwd=aws_arch_dir, capture_output=True, text=True, check=True)
         outputs = json.loads(result.stdout or "{}")
-        for key in ("attacker_ip", "attacker_public_ip", "attacker_machine_ip"):
-            if key in outputs and isinstance(outputs[key], dict) and "value" in outputs[key]:
-                return outputs[key]["value"]
+        attacker_pub = outputs.get("attacker_public_ip", {}).get("value")
+        if attacker_pub:
+            # Persist into config.json for later runs
+            update_config(DEFAULT_CONFIG_PATH, {"attacker_ip": attacker_pub, "attacker_public_ip": attacker_pub})
+            return attacker_pub
+        else:
+            print("[INFO] Terraform output missing 'attacker_public_ip'. Falling back to config.json.")
     except Exception as e:
         print(f"[INFO] Terraform outputs not available for attacker IP: {e}")
     cfg = load_config()
