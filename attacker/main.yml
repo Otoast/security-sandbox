@@ -2,6 +2,7 @@
 - name: Configure Attacker Machine for Elastic Security Lab
   hosts: attacker
   become: yes
+  gather_facts: yes
   vars:
     atomic_red_team_path: "/opt/AtomicRedTeam"
     project_repo_url: "https://github.com/Otoast/security-sandbox.git"
@@ -12,12 +13,27 @@
       apt:
         update_cache: yes
         cache_valid_time: 3600
-      when: ansible_os_family == "Debian"
+      when: ansible_facts['os_family'] == "Debian"
 
-    - name: Update yum cache (Amazon Linux/RedHat)
-      yum:
+    - name: Update dnf cache (Amazon Linux/RedHat)
+      dnf:
         update_cache: yes
-      when: ansible_os_family == "RedHat"
+      when: ansible_facts['os_family'] == "RedHat"
+      retries: 3
+      delay: 5
+      register: dnf_cache_update
+      until: dnf_cache_update is succeeded
+
+    - name: Check Amazon Linux version
+      command: cat /etc/os-release
+      register: os_release
+      changed_when: false
+      when: ansible_facts['os_family'] == "RedHat"
+
+    - name: Debug OS version
+      debug:
+        var: os_release.stdout_lines
+      when: ansible_facts['os_family'] == "RedHat"
 
     - name: Install required packages (Ubuntu/Debian)
       apt:
@@ -30,20 +46,40 @@
           - python3-pip
           - openssh-client
         state: present
-      when: ansible_os_family == "Debian"
+      when: ansible_facts['os_family'] == "Debian"
 
-    - name: Install required packages (Amazon Linux/RedHat)
-      yum:
+    - name: Install required packages (Amazon Linux 2023)
+      dnf:
         name:
           - git
           - wget
-          - curl
           - unzip
           - python3
           - python3-pip
           - openssh-clients
         state: present
-      when: ansible_os_family == "RedHat"
+        allowerasing: true
+      when: ansible_facts['os_family'] == "RedHat" and "2023" in (os_release.stdout | default(""))
+      retries: 3
+      delay: 5
+      register: al2023_packages
+      until: al2023_packages is succeeded
+
+    - name: Install required packages (Amazon Linux 2)
+      yum:
+        name:
+          - git
+          - wget
+          - unzip
+          - python3
+          - python3-pip
+          - openssh-clients
+        state: present
+      when: ansible_facts['os_family'] == "RedHat" and "2023" not in (os_release.stdout | default(""))
+      retries: 3
+      delay: 5
+      register: al2_packages
+      until: al2_packages is succeeded
 
     - name: Install PowerShell (Ubuntu/Debian)
       block:
@@ -71,10 +107,17 @@
             name: powershell
             state: present
             update_cache: yes
-      when: ansible_os_family == "Debian"
+      when: ansible_facts['os_family'] == "Debian"
 
     - name: Install PowerShell (Amazon Linux)
       block:
+        - name: Install libicu dependency for PowerShell
+          dnf:
+            name:
+              - libicu
+            state: present
+            allowerasing: true
+
         - name: Download PowerShell tar.gz
           get_url:
             url: "https://github.com/PowerShell/PowerShell/releases/download/v7.4.0/powershell-7.4.0-linux-x64.tar.gz"
@@ -98,7 +141,7 @@
             src: /opt/microsoft/powershell/7/pwsh
             dest: /usr/bin/pwsh
             state: link
-      when: ansible_os_family == "RedHat"
+      when: ansible_facts['os_family'] == "RedHat"
 
     - name: Create Atomic Red Team directory
       file:
@@ -139,7 +182,7 @@
         mode: '0700'
         owner: ec2-user
         group: ec2-user
-      when: ansible_os_family == "RedHat"
+      when: ansible_facts['os_family'] == "RedHat"
 
     - name: Create SSH directory for lab keys (Ubuntu)
       file:
@@ -148,7 +191,7 @@
         mode: '0700'
         owner: ubuntu
         group: ubuntu
-      when: ansible_os_family == "Debian"
+      when: ansible_facts['os_family'] == "Debian"
 
     - name: Copy internal_lab_key from local machine to attacker
       copy:
@@ -167,13 +210,13 @@
         group: "{{ ansible_user }}"
         block: |
           Host target-machine
-              HostName {{ target_private_ip | default('10.0.2.10') }}
+              HostName {{ target_private_ip | default('10.0.0.10') }}
               User ec2-user
               IdentityFile ~/.ssh/internal_lab_key
               StrictHostKeyChecking no
           
           Host logging-machine
-              HostName {{ control_private_ip | default('10.0.3.10') }}
+              HostName {{ control_private_ip | default('10.0.1.10') }}
               User ec2-user
               IdentityFile ~/.ssh/internal_lab_key
               StrictHostKeyChecking no
@@ -202,11 +245,24 @@
             echo "  ssh logging-machine"
           }
 
-    - name: Install Ansible on attacker machine
+    - name: Install Ansible on attacker machine (Debian)
       apt:
         name: ansible
         state: present
         update_cache: yes
+      when: ansible_facts['os_family'] == "Debian"
+
+    - name: Install Ansible on attacker machine (RedHat)
+      dnf:
+        name: ansible
+        state: present
+      when: ansible_facts['os_family'] == "RedHat"
+
+    - name: Create security-sandbox directory
+      file:
+        path: /opt/security-sandbox
+        state: directory
+        mode: '0755'
 
     - name: Create lab configuration file
       copy:

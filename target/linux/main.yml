@@ -59,11 +59,11 @@
   hosts: target_linux
   become: yes
   vars:
-    elastic_agent_version: "9.1.5"
+    elastic_agent_version: "8.17.0"
     insecure: true
 
   vars_files:
-    - ../../logging/linux/.fleet_credentials.yml
+    - ../../logging/.fleet_credentials.yml
 
   tasks:
     - name: Verify Fleet credentials are loaded
@@ -76,7 +76,7 @@
 
     - name: Copy Elastic Agent TAR from controller (offline)
       copy:
-        src: "{{ playbook_dir }}/../../downloads/elastic-agent-{{ elastic_agent_version }}-linux-x86_64.tar.gz"
+        src: "{{ playbook_dir }}/../../logging/downloads/elastic-agent-{{ elastic_agent_version }}-linux-x86_64.tar.gz"
         dest: "/tmp/elastic-agent.tar.gz"
         mode: '0644'
 

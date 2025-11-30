@@ -72,7 +72,35 @@ popd >/dev/null
 echo "[INFO] Syncing SSH client IP with Terraform security group..."
 "$PYTHON_BIN" deploy.py --update-ip auto
 
-echo "[INFO] Applying Terraform and running Ansible playbooks..."
+echo "[INFO] Applying Terraform infrastructure..."
+"$PYTHON_BIN" deploy.py --apply --no-ansible "$@"
+
+# Get the new attacker IP from config.json
+ATTACKER_IP=$("$PYTHON_BIN" -c "import json; print(json.load(open('config.json')).get('attacker_public_ip', ''))" 2>/dev/null || echo "")
+
+if [[ -n "$ATTACKER_IP" ]]; then
+  echo "[INFO] Waiting for EC2 instances to become available (SSH on $ATTACKER_IP)..."
+  MAX_WAIT=120
+  WAIT_INTERVAL=5
+  ELAPSED=0
+  
+  while (( ELAPSED < MAX_WAIT )); do
+    if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes \
+         -i ./ssh_keys/user_to_attacker_key "ec2-user@$ATTACKER_IP" exit 2>/dev/null; then
+      echo "[INFO] SSH connection successful after ${ELAPSED}s."
+      break
+    fi
+    echo "[INFO] Waiting for SSH... (${ELAPSED}s/${MAX_WAIT}s)"
+    sleep $WAIT_INTERVAL
+    ELAPSED=$((ELAPSED + WAIT_INTERVAL))
+  done
+  
+  if (( ELAPSED >= MAX_WAIT )); then
+    echo "[WARN] SSH not available after ${MAX_WAIT}s. Ansible may fail."
+  fi
+fi
+
+echo "[INFO] Running Ansible playbooks..."
 "$PYTHON_BIN" deploy.py --apply --setup all "$@"
 
 echo "[SUCCESS] Security sandbox provisioning complete."
