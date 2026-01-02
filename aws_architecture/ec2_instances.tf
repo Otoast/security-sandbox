@@ -10,12 +10,17 @@ resource "aws_instance" "attacker_machine" {
     associate_public_ip_address = true
     subnet_id = aws_subnet.lab_public_subnet.id
     
-    tags = {
+    tags = merge(local.common_tags, {
         Name = "attacker_machine"
-    }
+    })
     
     root_block_device {
       volume_size = 30
+    }
+    
+    # Prevent replacement due to AMI updates
+    lifecycle {
+      ignore_changes = [ami]
     }
 }
 
@@ -30,12 +35,21 @@ resource "aws_instance" "logging_machine" {
     availability_zone = local.config.availability_zone
     subnet_id = aws_subnet.lab_private_subnet.id
     
-    tags = {
+    tags = merge(local.common_tags, {
         Name = "logging_machine"
-    }
+    })
     
     root_block_device {
-      volume_size = 30
+      volume_size = 100  
+      volume_type = "gp3"
+      iops        = 6000        # default is 3000
+      throughput  = 500         # default is 125 MB/s
+      delete_on_termination = true
+    }
+    
+    # Prevent replacement due to AMI updates
+    lifecycle {
+      ignore_changes = [ami]
     }
 
 }
@@ -51,11 +65,16 @@ resource "aws_instance" "target_machine" {
     subnet_id = aws_subnet.lab_private_subnet.id
     host_id   = local.config.target_machine_os == "macos" ? aws_ec2_host.mac_host[0].id : null
     user_data = local.config.target_machine_os == "windows" ? file("../target/windows/user_data_windows") : null 
-    tags = {
+    tags = merge(local.common_tags, {
         Name = "target_machine"
-    }
+    })
 
     root_block_device {
       volume_size = 30
+    }
+    
+    # Prevent replacement due to AMI updates
+    lifecycle {
+      ignore_changes = [ami]
     }
 }

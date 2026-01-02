@@ -167,14 +167,6 @@
       register: powershell_module_install
       changed_when: powershell_module_install.rc == 0
 
-   # - name: Clone project repository with Ansible scripts
-    #  git:
-    #    repo: "{{ project_repo_url }}"
-    #    dest: "{{ project_repo_path }}"
-    #    version: main
-    #    force: yes
-    #  ignore_errors: yes  # In case repo doesn't exist yet
-
     - name: Create SSH directory for lab keys
       file:
         path: /home/ec2-user/.ssh
@@ -216,7 +208,7 @@
               StrictHostKeyChecking no
           
           Host logging-machine
-              HostName {{ control_private_ip | default('10.0.1.10') }}
+              HostName {{ logging_private_ip | default('10.0.1.10') }}
               User ec2-user
               IdentityFile ~/.ssh/internal_lab_key
               StrictHostKeyChecking no
@@ -269,8 +261,8 @@
         dest: "/opt/security-sandbox/lab-config.yaml" 
         content: |
           lab_name: "Elastic Security Sandbox"
-          target_ip: "{{ target_private_ip | default('10.0.2.10') }}"
-          control_ip: "{{ control_private_ip | default('10.0.3.10') }}"
+          target_ip: "{{ target_private_ip | default('10.0.0.10') }}"
+          logging_ip: "{{ logging_private_ip | default('10.0.1.10') }}"
           atomic_path: "{{ atomic_red_team_path }}"
         mode: '0644'
 
@@ -292,18 +284,25 @@
           
           2. SSH to other lab machines:
              ssh target-machine
-             ssh control-machine
+             ssh logging-machine
           
           3. Access Kibana (from your browser):
-             http://<control-machine-ip>:5601
-          
-          4. Run Ansible playbooks:
-             cd {{ project_repo_path }}
-             ansible-playbook control-machine-playbook.yml
-             ansible-playbook target-machine-playbook.yml
+             kibana-tunnel
+
           
           ================================================
         mode: '0644'
+
+    - name: Configure Kibana tunnel alias for easy access
+      block:
+        - name: Add Kibana tunnel alias to ec2-user bashrc with auto-open
+          lineinfile:
+            path: /home/ec2-user/.bashrc
+            line: "alias kibana-tunnel='(ssh -L 5601:{{ logging_private_ip | default('10.0.2.10') }}:5601 -N localhost &); sleep 2; (xdg-open http://localhost:5601 || open http://localhost:5601 || echo \"Tunnel established. Visit http://localhost:5601 in your browser\") 2>/dev/null &'"
+            state: present
+            insertafter: EOF
+            create: yes
+          become_user: ec2-user
 
     - name: Display completion message
       debug:
@@ -312,3 +311,9 @@
           - "Atomic Red Team installed at: {{ atomic_red_team_path }}"
           - "Project repository cloned to: {{ project_repo_path }}"
           - "You can now run Atomic tests and configure other machines"
+          - ""
+          - "To access Kibana from your local machine:"
+          - "  1. SSH into attacker: ssh -i <key> ec2-user@<attacker-ip>"
+          - "  2. Run the alias: kibana-tunnel"
+          - "  3. Kibana will automatically open in your browser at http://localhost:5601"
+          - "     (or manually visit http://localhost:5601 if auto-open doesn't work)"

@@ -15,6 +15,38 @@ PYTHON_BIN=${PYTHON_BIN:-python3}
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
+# If a .env file exists in the repo root, load it and export its variables so
+# subsequent commands (Terraform, AWS CLI, etc.) see them. This mirrors the
+# behaviour of `deploy.py` which also loads a .env when present.
+if [[ -f "$ROOT_DIR/.env" ]]; then
+  echo "[INFO] Loading environment variables from .env"
+  # shellcheck disable=SC1090
+  set -a
+  . "$ROOT_DIR/.env"
+  set +a
+  # Check whether the .env file actually defines AWS credentials; warn if it doesn't.
+  if ! grep -Eq '^\s*(AWS_PROFILE|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY)\s*=' "$ROOT_DIR/.env"; then
+    echo "[WARN] .env exists but does not define AWS_PROFILE or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY."
+    echo "       Terraform will need credentials from another source (environment, ~/.aws/credentials, or instance role)."
+  else
+    # If it contains some AWS vars, ensure it's not missing a pair (ACCESS_KEY without SECRET, etc.)
+    has_profile=false
+    has_access=false
+    has_secret=false
+    if grep -Eq '^\s*AWS_PROFILE\s*=' "$ROOT_DIR/.env"; then has_profile=true; fi
+    if grep -Eq '^\s*AWS_ACCESS_KEY_ID\s*=' "$ROOT_DIR/.env"; then has_access=true; fi
+    if grep -Eq '^\s*AWS_SECRET_ACCESS_KEY\s*=' "$ROOT_DIR/.env"; then has_secret=true; fi
+    if [[ "$has_profile" = false && ( "$has_access" = true && "$has_secret" = false ) ]]; then
+      echo "[WARN] .env defines AWS_ACCESS_KEY_ID but not AWS_SECRET_ACCESS_KEY; credentials may be incomplete."
+    fi
+    if [[ "$has_profile" = false && ( "$has_access" = false && "$has_secret" = true ) ]]; then
+      echo "[WARN] .env defines AWS_SECRET_ACCESS_KEY but not AWS_ACCESS_KEY_ID; credentials may be incomplete."
+    fi
+  fi
+else
+  echo "[INFO] No .env file found at $ROOT_DIR; continuing without it."
+fi
+
 require_cmd() {
   local cmd="$1"
   local install_hint="$2"
@@ -72,35 +104,8 @@ popd >/dev/null
 echo "[INFO] Syncing SSH client IP with Terraform security group..."
 "$PYTHON_BIN" deploy.py --update-ip auto
 
-echo "[INFO] Applying Terraform infrastructure..."
-"$PYTHON_BIN" deploy.py --apply --no-ansible "$@"
 
-# Get the new attacker IP from config.json
-ATTACKER_IP=$("$PYTHON_BIN" -c "import json; print(json.load(open('config.json')).get('attacker_public_ip', ''))" 2>/dev/null || echo "")
-
-if [[ -n "$ATTACKER_IP" ]]; then
-  echo "[INFO] Waiting for EC2 instances to become available (SSH on $ATTACKER_IP)..."
-  MAX_WAIT=120
-  WAIT_INTERVAL=5
-  ELAPSED=0
-  
-  while (( ELAPSED < MAX_WAIT )); do
-    if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes \
-         -i ./ssh_keys/user_to_attacker_key "ec2-user@$ATTACKER_IP" exit 2>/dev/null; then
-      echo "[INFO] SSH connection successful after ${ELAPSED}s."
-      break
-    fi
-    echo "[INFO] Waiting for SSH... (${ELAPSED}s/${MAX_WAIT}s)"
-    sleep $WAIT_INTERVAL
-    ELAPSED=$((ELAPSED + WAIT_INTERVAL))
-  done
-  
-  if (( ELAPSED >= MAX_WAIT )); then
-    echo "[WARN] SSH not available after ${MAX_WAIT}s. Ansible may fail."
-  fi
-fi
-
-echo "[INFO] Running Ansible playbooks..."
-"$PYTHON_BIN" deploy.py --apply --setup all "$@"
+echo "[INFO] Running Terraform Configuration + Ansible playbooks..."
+"$PYTHON_BIN" deploy.py --apply "$@"
 
 echo "[SUCCESS] Security sandbox provisioning complete."
