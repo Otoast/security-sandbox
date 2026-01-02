@@ -1,4 +1,3 @@
----
 - name: Control Machine Setup - ELK Stack
   hosts: logging_server
   become: yes
@@ -7,33 +6,69 @@
     elastic_version: "8.17.0"
     elasticsearch_dir: "/opt/elasticsearch-{{ elastic_version }}"
     kibana_dir: "/opt/kibana-{{ elastic_version }}"
-    # Download cache on Ansible controller (attacker machine)
     local_cache_dir: "{{ playbook_dir }}/downloads"
-    # Kibana / Fleet connection settings
     kibana_base_url: "http://localhost:5601"
     kibana_request_timeout: 60
     fleet_api_retries: 10
     fleet_api_delay: 10
+    package_registry_port: 8080
 
   tasks:
     ############################################################################
-    # PHASE 0: DOWNLOAD FILES ON CONTROLLER (ATTACKER MACHINE)
+    # PHASE 1: SYSTEM PREPARATION AND DOWNLOADS (AMAZON LINUX 2023)
     ############################################################################
     
-    - name: Ensure downloads directory exists on controller
-      local_action: file path="{{ local_cache_dir }}" state=directory
-      become: no
-      run_once: true
+    - name: Update dnf cache (Amazon Linux 2023)
+      dnf:
+        update_cache: yes
+      retries: 3
+      delay: 5
+      register: dnf_cache_update
+      until: dnf_cache_update is succeeded
 
-    - name: Download Elasticsearch on controller
-      local_action: get_url url="https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-{{ elastic_version }}-linux-x86_64.tar.gz" dest="{{ local_cache_dir }}/elasticsearch-{{ elastic_version }}-linux-x86_64.tar.gz" timeout=600
-      become: no
-      run_once: true
+    - name: Install prerequisites (Amazon Linux 2023)
+      dnf:
+        name:
+          - wget
+          - curl
+          - unzip
+          - tar
+        state: present
+        allowerasing: true
+      retries: 3
+      delay: 5
+      register: al2023_prereqs
+      until: al2023_prereqs is succeeded
 
-    ############################################################################
-    # PHASE 1: SYSTEM PREPARATION
-    ############################################################################
     
+    - name: Install Docker (Amazon Linux 2023)
+      ansible.builtin.shell: |
+        set -e
+        sudo dnf -y update
+        sudo dnf -y install docker
+      args:
+        executable: /bin/bash
+      register: install_docker
+      retries: 3
+      delay: 10
+      until: install_docker is succeeded
+
+    - name: Increase swap file
+      ansible.builtin.shell: |
+        sudo dd if=/dev/zero of=/swapfile bs=1M count=4096
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+      args:
+        executable: /bin/bash
+      
+    - name: Start and enable Docker
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
     - name: Set kernel parameters for Elasticsearch
       sysctl:
         name: vm.max_map_count
@@ -61,24 +96,20 @@
     # PHASE 2: ELASTICSEARCH INSTALLATION
     ############################################################################
     
-    - name: Copy Elasticsearch to control machine
-      copy:
-        src: "{{ local_cache_dir }}/elasticsearch-{{ elastic_version }}-linux-x86_64.tar.gz"
+    - name: Download Elasticsearch
+      get_url:
+        url: "https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-{{ elastic_version }}-linux-x86_64.tar.gz"
         dest: "/tmp/elasticsearch.tar.gz"
+        timeout: 600
       
-    - name: Extract Elasticsearch
+    - name: Extract Elasticsearch and set ownership
       unarchive:
         src: "/tmp/elasticsearch.tar.gz"
         dest: "/opt/"
         remote_src: yes
         creates: "{{ elasticsearch_dir }}"
-
-    - name: Set ownership of Elasticsearch directory
-      file:
-        path: "{{ elasticsearch_dir }}"
         owner: elasticsearch
         group: elasticsearch
-        recurse: yes
 
     - name: Configure Elasticsearch
       blockinfile:
@@ -129,58 +160,47 @@
       wait_for:
         port: 9200
         delay: 20
-        timeout: 300
-      
-    - name: Additional wait for Elasticsearch startup
-      pause:
-        seconds: 10
+        timeout: 60
 
-    - name: Reset elastic user password
-      command: "{{ elasticsearch_dir }}/bin/elasticsearch-reset-password -u elastic -b"
+    - name: Reset elastic user password 
+      command: "{{ elasticsearch_dir }}/bin/elasticsearch-reset-password -u elastic -b -f"
       register: elastic_password_output
       
     - name: Extract elastic password
       set_fact:
         elastic_password: "{{ elastic_password_output.stdout | regex_search('New value: (.+)', '\\1') | first }}"
       
+    # Delete me after debugging
     - name: Display elastic password
       debug:
         msg: "Elasticsearch 'elastic' user password: {{ elastic_password }}"
 
     ############################################################################
-    # PHASE 3: KIBANA INSTALLATION
+    # PHASE 3: KIBANA AND PACKAGE REGISTRY INSTALLATION
     ############################################################################
     
-    - name: Download Kibana on controller
-      local_action: get_url url="https://artifacts.elastic.co/downloads/kibana/kibana-{{ elastic_version }}-linux-x86_64.tar.gz" dest="{{ local_cache_dir }}/kibana-{{ elastic_version }}-linux-x86_64.tar.gz" timeout=600
-      become: no
-      run_once: true
+    - name: Pull Package Registry Docker image
+      docker_image:
+        name: "docker.elastic.co/package-registry/distribution"
+        tag: "{{ elastic_version }}"
+        source: pull
 
-    # Note: Fleet packages are bundled with Kibana when using xpack.fleet.isAirGapped: true
-    # No need to download from epr.elastic.co
+    - name: Start Elastic Package Registry container
+      docker_container:
+        name: package-registry
+        image: "docker.elastic.co/package-registry/distribution:{{ elastic_version }}"
+        ports:
+          - "{{ package_registry_port }}:8080"
+        env:
+          EPR_ADDRESS: "0.0.0.0:8080"
+        restart_policy: unless-stopped
+        state: started
 
-    - name: Check if Kibana service token exists
-      uri:
-        url: "http://localhost:9200/_security/service/elastic/kibana/credential"
-        method: GET
-        user: elastic
-        password: "{{ elastic_password }}"
-        force_basic_auth: yes
-        status_code: 200
-        return_content: yes
-      register: existing_tokens
-      failed_when: false
-
-    - name: Delete existing Kibana token if present
-      uri:
-        url: "http://localhost:9200/_security/service/elastic/kibana/credential/token/kibana-token"
-        method: DELETE
-        user: elastic
-        password: "{{ elastic_password }}"
-        force_basic_auth: yes
-        status_code: [200, 404]
-      when: existing_tokens.json['tokens'] is defined and ('kibana-token' in existing_tokens.json['tokens'])
-      failed_when: false
+    - name: Wait for Package Registry to be ready
+      wait_for:
+        port: "{{ package_registry_port }}"
+        delay: 10
+        timeout: 120
 
     - name: Create Kibana service account token
       uri:
@@ -193,75 +213,73 @@
         return_content: yes
       register: kibana_service_token
     
-    - name: Copy Kibana to control machine
-      copy:
-        src: "{{ local_cache_dir }}/kibana-{{ elastic_version }}-linux-x86_64.tar.gz"
+    - name: Download Kibana
+      get_url:
+        url: "https://artifacts.elastic.co/downloads/kibana/kibana-{{ elastic_version }}-linux-x86_64.tar.gz"
         dest: "/tmp/kibana.tar.gz"
+        timeout: 600
       
-    - name: Extract Kibana
+    - name: Extract Kibana and set ownership
       unarchive:
         src: "/tmp/kibana.tar.gz"
         dest: "/opt/"
         remote_src: yes
         creates: "{{ kibana_dir }}"
-
-    - name: Set ownership of Kibana directory
-      file:
-        path: "{{ kibana_dir }}"
         owner: kibana
         group: kibana
-        recurse: yes
+    
+    - name: Generate Kibana encryption keys
+      command: "{{ kibana_dir }}/bin/kibana-encryption-keys generate --force"
+      register: kibana_keys_output
 
-    # Fleet packages are bundled with Kibana when using xpack.fleet.isAirGapped: true
-    # No need to manually copy/extract packages
-
+    - name: Parse Kibana encryption keys from generator output
+      set_fact:
+        kibana_encrypted_saved_objects_key: "{{ kibana_keys_output.stdout_lines | select('match', 'xpack.encryptedSavedObjects.encryptionKey: (.+)') | map('regex_replace', 'xpack.encryptedSavedObjects.encryptionKey: (.+)', '\\1') | first }}"
+        kibana_reporting_key: "{{ kibana_keys_output.stdout_lines | select('match', 'xpack.reporting.encryptionKey: (.+)') | map('regex_replace', 'xpack.reporting.encryptionKey: (.+)', '\\1') | first }}"
+        kibana_security_key: "{{ kibana_keys_output.stdout_lines | select('match', 'xpack.security.encryptionKey: (.+)') | map('regex_replace', 'xpack.security.encryptionKey: (.+)', '\\1') | first }}"
+    
     - name: Configure Kibana
       blockinfile:
         path: "{{ kibana_dir }}/config/kibana.yml"
         block: |
           server.host: "0.0.0.0"
           server.port: 5601
-          elasticsearch.hosts: ["http://localhost:9200"]
+          elasticsearch.hosts: ["http://{{ ansible_default_ipv4.address }}:9200"]
           elasticsearch.serviceAccountToken: "{{ kibana_service_token.json.token.value }}"
+          
+          # Encryption keys (must be stable across runs)
+          xpack.encryptedSavedObjects.encryptionKey: "{{ kibana_encrypted_saved_objects_key }}"
+          xpack.reporting.encryptionKey: "{{ kibana_reporting_key }}"
+          xpack.security.encryptionKey: "{{ kibana_security_key }}"
           
           # Fleet air-gapped configuration (requires 8.13.0+)
           xpack.fleet.isAirGapped: true
           
+          # Use local package registry
+          xpack.fleet.registryUrl: "http://{{ ansible_default_ipv4.address }}:{{ package_registry_port }}"
+          
           # Pre-configure Fleet Server host (avoids registry lookup)
-          xpack.fleet.agents.fleet_server.hosts: ["http://localhost:8220"]
+          xpack.fleet.agents.fleet_server.hosts: ["http://{{ ansible_default_ipv4.address }}:8220"]
           
           # Pre-configure Elasticsearch output
           xpack.fleet.outputs:
-            - id: fleet-default-output
-              name: default
-              type: elasticsearch
-              hosts: ["http://localhost:9200"]
-              is_default: true
-              is_default_monitoring: true
+          - id: fleet-default-output
+            name: default
+            type: elasticsearch
+            hosts: ["http://localhost:9200"]
+            is_default: true
+            is_default_monitoring: true
           
-          # Pre-configure Fleet Server policy with bundled packages
           xpack.fleet.packages:
-            - name: fleet_server
-              version: latest
-            - name: elastic_agent
-              version: latest
-            - name: system
-              version: latest
-          
-          xpack.fleet.agentPolicies:
-            - name: Fleet Server policy
-              id: fleet-server-policy
-              namespace: default
-              monitoring_enabled:
-                - logs
-                - metrics
-              is_default_fleet_server: true
-              package_policies:
-                - name: fleet_server-1
-                  id: fleet-server-1
-                  package:
-                    name: fleet_server
-        marker: "# {mark} ANSIBLE MANAGED BLOCK"
+          - name: fleet_server
+            version: latest
+          - name: system
+            version: latest
+          - name: endpoint
+            version: latest
+          - name: osquery
+            version: latest
+
 
     - name: Create Kibana systemd service
       copy:
@@ -285,23 +303,18 @@
       systemd:
         daemon_reload: yes
 
-    - name: Start Kibana service
+    - name: Start/Restart Kibana 
       systemd:
         name: kibana
-        state: started
+        state: restarted
         enabled: yes
       
     - name: Wait for Kibana to be ready
       wait_for:
         port: 5601
-        delay: 30
-        timeout: 300
-
-    - name: Additional wait for Kibana initialization
-      pause:
-        seconds: 20
-        prompt: "Waiting for Kibana to fully initialize Fleet policies..."
-
+        delay: 10
+        timeout: 60
+        
     - name: Wait for Kibana license to be available
       uri:
         url: "{{ kibana_base_url }}/api/status"
@@ -318,6 +331,11 @@
       retries: 20
       delay: 15
       until: kibana_status.status == 200 and kibana_status.json.status.overall.level == 'available'
+      when: not (kibana_precheck is defined and kibana_precheck.status == 200 and kibana_precheck.json.status.overall.level == 'available')
+
+    ############################################################################
+    # SETUP DEFAULT AGENT POLICY
+    ############################################################################
 
     - name: Enable Fleet in Kibana
       uri:
@@ -330,58 +348,55 @@
           kbn-xsrf: "true"
           Content-Type: "application/json"
         timeout: 300
-        status_code: [200, 409, 500]
+        status_code: 200
         return_content: yes
       register: fleet_setup
-      failed_when: false
-      retries: 10
-      delay: 30
-      until: fleet_setup.status in [200, 409]
 
-    - name: Debug Fleet setup response
-      debug:
-        msg: "Fleet setup status: {{ fleet_setup.status | default('unknown') }}, response: {{ fleet_setup.json | default({}) }}"
-      when: fleet_setup is defined
-
-    - name: Wait for Fleet to initialize
-      pause:
-        seconds: 15
-        prompt: "Waiting for Fleet to fully initialize with preconfigured policies..."
-
-    - name: Get Fleet Server policy (preconfigured via kibana.yml)
+    - name: Create Fleet Server policy
       uri:
-        url: "{{ kibana_base_url }}/api/fleet/agent_policies"
+       url: "{{ kibana_base_url }}/api/fleet/agent_policies"
+       method: POST
+       user: elastic
+       password: "{{ elastic_password }}"
+       force_basic_auth: yes
+       headers:
+         kbn-xsrf: "true"
+         Content-Type: "application/json"
+       body_format: json
+       body:
+         id: "fleet-server-policy"
+         name: "Fleet Server policy"
+         namespace: "default"
+         description: "Fleet Server policy (created by Ansible)"
+         monitoring_enabled: ["logs", "metrics"]
+         has_fleet_server: true
+       status_code: 200
+      register: fleet_policy_resp
+
+    - name: Set Fleet Server policy id fact
+      set_fact:
+        fleet_server_policy_id: "fleet-server-policy"
+
+    - name: Get fleet_server package details (resolve version)
+      uri:
+        url: "{{ kibana_base_url }}/api/fleet/epm/packages/fleet_server"
         method: GET
         user: elastic
         password: "{{ elastic_password }}"
         force_basic_auth: yes
         headers:
           kbn-xsrf: "true"
-        status_code: 200
         return_content: yes
-        timeout: "{{ kibana_request_timeout }}"
-      register: fleet_policies
-      retries: 10
-      delay: 10
-      until: fleet_policies.status == 200
+        status_code: 200
+      register: fleet_server_pkg
 
-    - name: Set Fleet Server policy ID (using preconfigured ID)
+    - name: Set fleet_server package version fact
       set_fact:
-        fleet_server_policy_id: "fleet-server-policy"
+        fleet_server_pkg_version: "{{ fleet_server_pkg.json.item.version | default('') }}"
 
-    - name: Verify Fleet Server policy exists
-      set_fact:
-        fleet_server_policy_exists: "{{ fleet_policies.json['items'] | selectattr('id', 'equalto', 'fleet-server-policy') | list | length > 0 }}"
-
-    - name: Debug Fleet policy status
-      debug:
-        msg: "Fleet Server policy exists: {{ fleet_server_policy_exists }}, Policy ID: {{ fleet_server_policy_id }}"
-
-    # Policy and integration are preconfigured in kibana.yml via xpack.fleet.agentPolicies
-    # Only create if the preconfigured policy didn't get created (fallback)
-    - name: Create Fleet Server policy if preconfigured one doesn't exist
+    - name: Add Fleet Server Integration to Fleet Server Policy
       uri:
-        url: "{{ kibana_base_url }}/api/fleet/agent_policies"
+        url: "{{ kibana_base_url }}/api/fleet/package_policies"
         method: POST
         user: elastic
         password: "{{ elastic_password }}"
@@ -391,50 +406,48 @@
           Content-Type: "application/json"
         body_format: json
         body:
-          id: "fleet-server-policy"
-          name: "Fleet Server policy"
+          name: "Fleet Server"
+          description: "Fleet Server Integration"
+          policy_id: "{{ fleet_server_policy_id }}"
+          package:
+            name: "fleet_server"
+            version: "{{ fleet_server_pkg_version | default('') if fleet_server_pkg_version | length > 0 else 'latest' }}"
+        return_content: yes
+        status_code: 201
+      register: fleet_server_integration_result
+
+    - name: Create Default Agent Policy
+      uri:
+        url: "{{ kibana_base_url }}/api/fleet/agent_policies"
+        method: POST
+        user: "elastic"
+        password: "{{ elastic_password }}"
+        force_basic_auth: yes
+        headers:
+          kbn-xsrf: "true"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          name: "Default Agent Policy"
+          description: "Created via Ansible"
           namespace: "default"
-          description: "Fleet Server policy (created by Ansible)"
           monitoring_enabled:
             - logs
             - metrics
-          has_fleet_server: true
-        status_code: [200, 201, 409]
         return_content: yes
-        timeout: "{{ kibana_request_timeout }}"
-      register: fleet_server_policy_created
-      failed_when: false
-      when: not fleet_server_policy_exists
-      retries: 3
-      delay: 10
+        status_code: 201
+      register: fleet_policy
+
+    - name: Set default policy id from creation
+      set_fact:
+        default_policy_id: "{{ fleet_policy.json.item.id }}"
+
+
 
     ############################################################################
     # PHASE 4: FLEET SERVER INSTALLATION
     ############################################################################
     
-    - name: Check if Fleet service token exists
-      uri:
-        url: "http://localhost:9200/_security/service/elastic/fleet-server/credential"
-        method: GET
-        user: elastic
-        password: "{{ elastic_password }}"
-        force_basic_auth: yes
-        status_code: 200
-        return_content: yes
-      register: existing_fleet_tokens
-      failed_when: false
-
-    - name: Delete existing Fleet token if present
-      uri:
-        url: "http://localhost:9200/_security/service/elastic/fleet-server/credential/token/fleet-token"
-        method: DELETE
-        user: elastic
-        password: "{{ elastic_password }}"
-        force_basic_auth: yes
-        status_code: [200, 404]
-      when: existing_fleet_tokens.json['tokens'] is defined and ('fleet-token' in existing_fleet_tokens.json['tokens'])
-      failed_when: false
-
     - name: Create Fleet service token
       uri:
         url: "http://localhost:9200/_security/service/elastic/fleet-server/credential/token/fleet-token"
@@ -446,15 +459,11 @@
         return_content: yes
       register: fleet_service_token
       
-    - name: Download Elastic Agent on controller
-      local_action: get_url url="https://artifacts.elastic.co/downloads/beats/elastic-agent/elastic-agent-{{ elastic_version }}-linux-x86_64.tar.gz" dest="{{ local_cache_dir }}/elastic-agent-{{ elastic_version }}-linux-x86_64.tar.gz" timeout=600
-      become: no
-      run_once: true
-
-    - name: Copy Elastic Agent to control machine
-      copy:
-        src: "{{ local_cache_dir }}/elastic-agent-{{ elastic_version }}-linux-x86_64.tar.gz"
+    - name: Download Elastic Agent
+      get_url:
+        url: "https://artifacts.elastic.co/downloads/beats/elastic-agent/elastic-agent-{{ elastic_version }}-linux-x86_64.tar.gz"
         dest: "/tmp/elastic-agent.tar.gz"
+        timeout: 600
       
     - name: Extract Elastic Agent
       unarchive:
@@ -463,11 +472,6 @@
         remote_src: yes
         creates: "/opt/elastic-agent-{{ elastic_version }}-linux-x86_64"
       
-    - name: Check if Fleet Server is already installed
-      stat:
-        path: /opt/Elastic/Agent/elastic-agent
-      register: fleet_agent_installed
-
     - name: Install Fleet Server
       shell: |
         cd /opt/elastic-agent-{{ elastic_version }}-linux-x86_64
@@ -480,46 +484,14 @@
           --fleet-server-port=8220 \
           --fleet-server-insecure-http \
           --non-interactive
-      when: not fleet_agent_installed.stat.exists
       
     - name: Wait for Fleet Server to be ready
       wait_for:
         port: 8220
         delay: 10
-        timeout: 180
+        timeout: 60
 
-    - name: Get Fleet enrollment API key list
-      uri:
-        url: "{{ kibana_base_url }}/api/fleet/enrollment_api_keys"
-        method: GET
-        user: elastic
-        password: "{{ elastic_password }}"
-        force_basic_auth: yes
-        headers:
-          kbn-xsrf: "true"
-        status_code: 200
-        return_content: yes
-        timeout: "{{ kibana_request_timeout }}"
-      register: existing_enrollment_keys
-      failed_when: false
-
-    - name: Set default enrollment facts
-      set_fact:
-        fleet_enrollment_token: ""
-        fleet_enrollment_key_found: false
-
-    - name: Find existing enrollment key for policy
-      set_fact:
-        fleet_enrollment_token: "{{ item.api_key }}"
-        fleet_enrollment_key_found: true
-      loop: "{{ existing_enrollment_keys.json['list'] | default([]) }}"
-      when:
-        - item.name is defined
-        - item.policy_id is defined
-        - "'auto-enroll' in item.name"
-        - item.policy_id == fleet_server_policy_id
-
-    - name: Create Fleet enrollment API key if missing
+    - name: Create Fleet enrollment API key
       uri:
         url: "{{ kibana_base_url }}/api/fleet/enrollment_api_keys"
         method: POST
@@ -534,34 +506,38 @@
           name: "auto-enroll"
           policy_id: "{{ fleet_server_policy_id }}"
           expiration: "1d"
-        status_code: [200, 201]
+        status_code: 201
         return_content: yes
         timeout: "{{ kibana_request_timeout }}"
       register: fleet_enrollment_response
-      when: not fleet_enrollment_key_found
-      failed_when: false
 
-    - name: Set enrollment token from created key if created
+    - name: Set enrollment token from created key
       set_fact:
         fleet_enrollment_token: "{{ fleet_enrollment_response.json.item.api_key }}"
-      when: 
-        - fleet_enrollment_response is defined
-        - fleet_enrollment_response.json is defined
-        - fleet_enrollment_response.json.item is defined
-        - fleet_enrollment_response.json.item.api_key is defined
 
-    - name: Get any existing enrollment key if token still empty
+    - name: Create enrollment token for Default Policy
+      uri:
+        url: "{{ kibana_base_url }}/api/fleet/enrollment_api_keys"
+        method: POST
+        user: elastic
+        password: "{{ elastic_password }}"
+        force_basic_auth: yes
+        headers:
+          kbn-xsrf: "true"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          name: "default-policy-enroll"
+          policy_id: "{{ default_policy_id }}"
+          expiration: "7d"
+        status_code: 201
+        return_content: yes
+        timeout: "{{ kibana_request_timeout }}"
+      register: default_policy_enrollment_response
+
+    - name: Set default policy enrollment token (for target machines)
       set_fact:
-        fleet_enrollment_token: "{{ (existing_enrollment_keys.json['list'] | first).api_key }}"
-      when:
-        - fleet_enrollment_token == ""
-        - existing_enrollment_keys.json['list'] is defined
-        - existing_enrollment_keys.json['list'] | length > 0
-
-    - name: Warn if no enrollment token available
-      debug:
-        msg: "WARNING: No Fleet enrollment token was created or found. You may need to create one manually in Kibana."
-      when: fleet_enrollment_token == ""
+        default_policy_enrollment_token: "{{ default_policy_enrollment_response.json.item.api_key }}"
 
     ############################################################################
     # PHASE 5: DISPLAY CREDENTIALS
@@ -574,7 +550,8 @@
           # Control Server: {{ ansible_default_ipv4.address }}
           
           fleet_url: "http://{{ ansible_default_ipv4.address }}:8220"
-          fleet_enrollment_token: "{{ fleet_enrollment_token }}"
+          fleet_enrollment_token: "{{ default_policy_enrollment_token | default(fleet_enrollment_token) }}"
+          fleet_server_enrollment_token: "{{ fleet_enrollment_token }}"
           elasticsearch_host: "http://{{ ansible_default_ipv4.address }}:9200"
           elastic_username: "elastic"
           elastic_password: "{{ elastic_password }}"
@@ -594,6 +571,7 @@
           - Elasticsearch: http://{{ ansible_default_ipv4.address }}:9200
           - Kibana:        http://{{ ansible_default_ipv4.address }}:5601
           - Fleet Server:  http://{{ ansible_default_ipv4.address }}:8220
+          - Package Registry: http://{{ ansible_default_ipv4.address }}:{{ package_registry_port }}
           
           Credentials:
           - Username: elastic
@@ -624,7 +602,7 @@
     # PHASE 6: CLEANUP
     ############################################################################
     
-    - name: Remove temporary downloaded tarballs from target machine
+    - name: Remove temporary downloaded files
       file:
         path: "{{ item }}"
         state: absent
@@ -637,19 +615,12 @@
       debug:
         msg: |
           ============================================================
-          🧹 CLEANUP COMPLETE
+           CLEANUP COMPLETE
           ============================================================
           
-          Removed temporary files from target machine:
+          Removed temporary files from logging server:
           - /tmp/elasticsearch.tar.gz
           - /tmp/kibana.tar.gz  
           - /tmp/elastic-agent.tar.gz
-          
-          Note: Downloaded files on controller are kept at:
-          {{ local_cache_dir }}
-          (Useful for re-deploying without re-downloading)
-          
-          To clean controller cache, run:
-          rm -rf {{ local_cache_dir }}
-          
+
           ============================================================

@@ -1,5 +1,16 @@
 locals {
   config = jsondecode(file("${path.module}/../config.json"))
+  
+  common_tags = {
+    ProvisionedBy = "security-sandbox"
+    User          = local.config.user
+    ManagedBy     = "terraform"
+  }
+}
+
+variable "enable_provisioning" {
+  type    = bool
+  default = false
 }
 
 variable "attacker_custom_ami" {
@@ -57,11 +68,19 @@ variable "availability_zone" {
 resource "aws_key_pair" "user_attacker_key" {
   key_name   = local.user_attacker_key_aws_name
   public_key = file(local.user_attacker_key_path)
+  
+  tags = merge(local.common_tags, {
+    Name = "user_attacker_key"
+  })
 }
 
 resource "aws_key_pair" "internal_lab_key" {
   key_name   = local.internal_lab_key_aws_name
   public_key = file(local.internal_lab_key_path)
+  
+  tags = merge(local.common_tags, {
+    Name = "internal_lab_key"
+  })
 }
 
 data "aws_ami" "linux" {

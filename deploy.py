@@ -4,6 +4,7 @@ import sys
 import json
 import argparse
 import time
+import shutil
 from pathlib import Path
 from urllib.request import urlopen
 
@@ -77,15 +78,14 @@ def get_attacker_ip():
         outputs = json.loads(result.stdout or "{}")
         attacker_pub = outputs.get("attacker_public_ip", {}).get("value")
         if attacker_pub:
-            # Persist into config.json for later runs
-            update_config(DEFAULT_CONFIG_PATH, {"attacker_ip": attacker_pub, "attacker_public_ip": attacker_pub})
+            update_config(DEFAULT_CONFIG_PATH, {"attacker_public_ip": attacker_pub})
             return attacker_pub
         else:
             print("[INFO] Terraform output missing 'attacker_public_ip'. Falling back to config.json.")
     except Exception as e:
         print(f"[INFO] Terraform outputs not available for attacker IP: {e}")
     cfg = load_config()
-    return cfg.get("attacker_ip")
+    return cfg.get("attacker_public_ip")
 
 # Modular setup functions
 def setup_attacker():
@@ -128,9 +128,17 @@ def setup_logging(attacker_host: str, attacker_user: str, ssh_key_path: Path):
     log_dir = Path(__file__).parent / "logging"
     playbook = log_dir / "main.yml"
     inventory = log_dir / "logging_server.ini"
+    aws_arch_dir = Path(__file__).parent / "aws_architecture"
+    print("First provisioning tempoary NAT Gateway Access...")
+    run_command(["terraform", "apply", "-auto-approve", "-var=enable_provisioning=true"], cwd=aws_arch_dir)
+    print("Provisioning complete.")
+    print("NOTE: NAT Gateways incur additional costs. If setup fails after successful Terraform provisioning and you would like to avoid costs, try:")
+    print("\tterraform apply -auto-approve -var=enable_provisioning=false\n")
+    print("Proceeding with logging setup...")
 
     proxy = f'-o StrictHostKeyChecking=no -o ProxyCommand="ssh -o StrictHostKeyChecking=no -W %h:%p -q {attacker_user}@{attacker_host} -i {ssh_key_path} "'
     print(f"Running logging setup locally (inventory: {inventory}) using attacker {attacker_host} as jump host")
+    
     run_command([
         "ansible-playbook",
         str(playbook),
@@ -139,6 +147,9 @@ def setup_logging(attacker_host: str, attacker_user: str, ssh_key_path: Path):
         "-e",
         f"ansible_ssh_common_args='{proxy}'"
     ], cwd=Path(__file__).parent )
+    
+    print("Removing temporary NAT Gateway Access...")
+    run_command(["terraform", "apply", "-auto-approve", "-var=enable_provisioning=false"], cwd=aws_arch_dir)
 
 def setup_target(os_name: str, attacker_host: str, attacker_user: str, ssh_key_path: Path):
     """Copy target files and ssh_keys to attacker, then run ansible-playbook on attacker."""
@@ -168,6 +179,71 @@ def run_remote_ssh(key_path: Path, user: str, host: str, remote_command: str):
     except subprocess.CalledProcessError as e:
         print(f"Remote SSH command failed (exit {e.returncode}). Command: {remote_command}")
 
+def get_logging_server_ip():
+    """Get the logging server private IP from Terraform outputs."""
+    aws_arch_dir = Path(__file__).parent / "aws_architecture"
+    try:
+        outputs = get_terraform_outputs(aws_arch_dir)
+        logging_ip = outputs.get("logging_private_ip", {}).get("value")
+        if logging_ip:
+            return logging_ip
+        else:
+            print("[INFO] Terraform output missing 'logging_private_ip'.")
+    except Exception as e:
+        print(f"[INFO] Could not get logging server IP from Terraform: {e}")
+    return None
+
+def connect_kibana_port_forward():
+    """Set up port forwarding from logging server's Kibana (5601) to local machine."""
+    cfg = load_config()
+    logging_host = cfg.get("logging_private_ip")
+    attacker_host = cfg.get("attacker_public_ip")
+    if not attacker_host:
+        print("Could not determine attacker IP for SSH tunnel.")
+        return
+        
+    if not logging_host:
+        print("Could not determine logging server IP.")
+        return
+        
+    config = load_config()
+    ssh_keys_dir = Path(config.get("ssh_keys_dir", "./ssh_keys"))
+    user_to_attacker_key = ssh_keys_dir / config["user_to_attacker_ssh_key"]["name"]
+    
+    if not user_to_attacker_key.exists():
+        print(f"SSH key not found: {user_to_attacker_key}")
+        return
+        
+    local_port = cfg.get("local_kibana_port", 5601)
+    remote_port = 5601
+    
+    print(f"Setting up Kibana port forwarding:")
+    print(f"  Local:  http://localhost:{local_port}")
+    print(f"  Remote: http://{logging_host}:{remote_port} (via {attacker_host})")
+    print(f"  Tunnel: localhost:{local_port} -> {attacker_host} -> {logging_host}:{remote_port}\n")
+    print(f"Access Kibana at: http://localhost:{local_port}")
+    print("   Login credentials are in: logging/.fleet_credentials.yml\n")
+    print("   Press Ctrl+C to stop port forwarding")
+    
+    try:
+        # SSH tunnel: local:5601 -> attacker -> logging_server:5601
+        ssh_cmd = [
+            "ssh",
+            "-o", "StrictHostKeyChecking=no",
+            "-i", str(user_to_attacker_key),
+            "-L", f"{local_port}:{logging_host}:{remote_port}",
+            "-N",  # Don't execute remote commands, just forward ports
+            f"ec2-user@{attacker_host}"
+        ]
+        
+        print(f"Running: {' '.join(ssh_cmd)}")
+        subprocess.run(ssh_cmd)
+        
+    except KeyboardInterrupt:
+        print("\n🛑 Port forwarding stopped.")
+    except subprocess.CalledProcessError as e:
+        print(f"❌ SSH tunnel failed: {e}")
+
 def load_config():
     """Load config.json and return dict; empty dict on failure."""
     try:
@@ -187,14 +263,14 @@ def get_attacker_ip():
         attacker_pub = outputs.get("attacker_public_ip", {}).get("value")
         if attacker_pub:
             # Persist into config.json for later runs
-            update_config(DEFAULT_CONFIG_PATH, {"attacker_ip": attacker_pub, "attacker_public_ip": attacker_pub})
+            update_config(DEFAULT_CONFIG_PATH, {"attacker_public_ip": attacker_pub})
             return attacker_pub
         else:
             print("[INFO] Terraform output missing 'attacker_public_ip'. Falling back to config.json.")
     except Exception as e:
         print(f"[INFO] Terraform outputs not available for attacker IP: {e}")
     cfg = load_config()
-    return cfg.get("attacker_ip")
+    return cfg.get("attacker_public_ip")
 
 def get_terraform_outputs(cwd):
     """Retrieves all outputs from Terraform state as a dictionary."""
@@ -302,87 +378,6 @@ def load_snapshots_into_env():
     else:
         print("   Terraform will use these custom AMIs for the next apply.\n")
 
-# Modular setup functions
-def setup_attacker():
-    """Run attacker/main.yml playbook with attacker/attacker.ini inventory."""
-    att_dir = Path(__file__).parent / "attacker"
-    playbook = att_dir / "main.yml"
-    inventory = att_dir / "inventory.ini"
-    attacker_host = get_attacker_ip()
-    lines = inventory.read_text().splitlines()
-    new_lines = []
-    in_attacker_section = False
-    replaced = False
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            # entering a (new) section
-            in_attacker_section = (stripped.lower() == "[attacker]")
-            new_lines.append(line)
-            continue
-        if in_attacker_section and not replaced:
-            # replace the first non-empty, non-comment line in attacker section with the IP
-            if stripped and not stripped.startswith("#"):
-                new_lines.append(str(attacker_host))
-                replaced = True
-                continue
-        new_lines.append(line)
-    # If attacker section was found but had no host line, append it
-    if in_attacker_section and not replaced:
-        new_lines.append(str(attacker_host))
-    inventory.write_text("\n".join(new_lines) + "\n")
-
-    print("Running attacker setup...")
-    run_command([
-        "ansible-playbook", str(playbook), "-i", str(inventory),
-        "-e", 'ansible_ssh_common_args="-o StrictHostKeyChecking=no"'
-    ], cwd=Path(__file__).parent )
-
-def setup_logging(attacker_host: str, attacker_user: str, ssh_key_path: Path):
-    """Run logging playbook locally. Pass ansible_ssh_common_args to use attacker as jump host."""
-    log_dir = Path(__file__).parent / "logging"
-    playbook = log_dir / "main.yml"
-    inventory = log_dir / "logging_server.ini"
-
-    proxy = f'-o StrictHostKeyChecking=no -o ProxyCommand="ssh -o StrictHostKeyChecking=no -W %h:%p -q {attacker_user}@{attacker_host} -i {ssh_key_path} "'
-    print(f"Running logging setup locally (inventory: {inventory}) using attacker {attacker_host} as jump host")
-    run_command([
-        "ansible-playbook",
-        str(playbook),
-        "-i",
-        str(inventory),
-        "-e",
-        f"ansible_ssh_common_args='{proxy}'"
-    ], cwd=Path(__file__).parent )
-
-def setup_target(os_name: str, attacker_host: str, attacker_user: str, ssh_key_path: Path):
-    """Copy target files and ssh_keys to attacker, then run ansible-playbook on attacker."""
-    target_dir = Path(__file__).parent / "target" / os_name
-    playbook = target_dir / "main.yml"
-    inventory = target_dir / f"target_{os_name}.ini"
-    print(f"Running target ({os_name}) setup on attacker...")
-    proxy = f'-o StrictHostKeyChecking=no -o ProxyCommand="ssh -o StrictHostKeyChecking=no -W %h:%p -q {attacker_user}@{attacker_host} -i {ssh_key_path} "'
-    run_command([
-        "ansible-playbook",
-        str(playbook),
-        "-i",
-        str(inventory),
-        "-e",
-        f"ansible_ssh_common_args='{proxy}'"
-    ], cwd=Path(__file__).parent )
-
-def run_remote_ssh(key_path: Path, user: str, host: str, remote_command: str):
-    """Execute a remote shell command on attacker via SSH.
-    """
-    ssh_cmd = [
-        "ssh", "-o", "StrictHostKeyChecking=no", "-i", str(key_path), f"{user}@{host}", remote_command
-    ]
-    print(f"[SSH] Executing on {host}: {remote_command}")
-    try:
-        run_command(ssh_cmd)
-    except subprocess.CalledProcessError as e:
-        print(f"Remote SSH command failed (exit {e.returncode}). Command: {remote_command}")
-
 def main():
     parser = argparse.ArgumentParser(
         description="Deployment utility for Terraform + Ansible",
@@ -390,7 +385,8 @@ def main():
     )
     parser.add_argument("--apply", action="store_true", help="Apply (deploy) Terraform configuration")
     parser.add_argument("--destroy", action="store_true", help="Destroy all Terraform-managed resources")
-    parser.add_argument("--connect", action="store_true", help="Open an interactive SSH shell to ec2-user@<attacker-ip> using the user_to_attacker_key")
+    parser.add_argument("--connect", nargs='?', const='attacker', choices=['attacker', 'kibana'], 
+                       help="Connect to services: 'attacker' for SSH shell (default), 'kibana' for Kibana port forwarding")
     parser.add_argument("--update-ip", nargs='?', const='auto', metavar='IP', help="Update SSH client IP in config.json and attacker security group via targeted Terraform apply. Optionally provide IP address (default: auto-detect)")
     parser.add_argument("--target", choices=['macos', 'windows', 'linux'], help="Set target_machine_os in config.json (works with --apply)")
     parser.add_argument("--no-ansible", action="store_true", help="Skip running the Ansible playbook")
@@ -430,7 +426,7 @@ def main():
             print(f"Using provided IP: {ip} instead of auto-detect.")
         update_config(DEFAULT_CONFIG_PATH, {"user_ip": ip})
         run_command(
-            ["terraform", "apply", "-target=aws_security_group.attacker_machine_sg", "-auto-approve"],
+            ["terraform", "apply", "-target=aws_security_group_rule.user_to_attacker_ssh", "-auto-approve"],
             cwd=aws_arch_dir
         )
         print("Config.json and environment successfully updated with new IP")
@@ -438,20 +434,23 @@ def main():
 
     os.environ["TF_VAR_availability_zone"] = os.environ.get("AWS_DEFAULT_REGION", "us-east-1a")
 
-    # If user only wants to connect to the attacker instance, fetch its IP and open an interactive shell
+    # If user wants to connect to services
     if args.connect:
-        attacker_host = get_attacker_ip()
-        if not attacker_host:
-            print("Could not determine attacker IP (terraform outputs missing and config.json fallback empty).")
-            return
-        if not user_to_attacker_key.exists():
-            print(f"SSH key not found: {user_to_attacker_key}. Ensure the key file exists relative to repo root.")
-            return
-        print(f"Opening SSH session to ec2-user@{attacker_host} using key {user_to_attacker_key}")
-        try:
-            run_command(["ssh", "-o", "StrictHostKeyChecking=no", "-i", str(user_to_attacker_key), f"ec2-user@{attacker_host}"], cwd=Path(__file__).parent)
-        except subprocess.CalledProcessError as e:
-            print(f"SSH command failed: {e}")
+        if args.connect == 'kibana':
+            connect_kibana_port_forward()
+        else:  # Default to attacker SSH
+            attacker_host = get_attacker_ip()
+            if not attacker_host:
+                print("Could not determine attacker IP (terraform outputs missing and config.json fallback empty).")
+                return
+            if not user_to_attacker_key.exists():
+                print(f"SSH key not found: {user_to_attacker_key}. Ensure the key file exists relative to repo root.")
+                return
+            print(f"Opening SSH session to ec2-user@{attacker_host} using key {user_to_attacker_key}")
+            try:
+                run_command(["ssh", "-o", "StrictHostKeyChecking=no", "-i", str(user_to_attacker_key), f"ec2-user@{attacker_host}"], cwd=Path(__file__).parent)
+            except subprocess.CalledProcessError as e:
+                print(f"SSH command failed: {e}")
         return
 
     if args.create_snapshot:
@@ -478,30 +477,37 @@ def main():
         run_command(["terraform", "init"], cwd=aws_arch_dir)
         run_command(["terraform", "apply", "-auto-approve"], cwd=aws_arch_dir)
         print("Terraform apply complete.")
-        if not args.no_ansible:
-            attacker_host = get_attacker_ip() 
-            complete_setup = args.setup in [None, "all"]
-            if complete_setup or args.setup == "attacker":
-                setup_attacker()
-            if complete_setup or args.setup == "logging": 
-                setup_logging(attacker_host, "ec2-user", user_to_attacker_key)
-            if complete_setup or args.setup == "target":
-                setup_target(os_name, attacker_host, "ec2-user", user_to_attacker_key)
+        if not args.no_ansible and not args.setup:
+            attacker_host = get_attacker_ip()
+            setup_attacker()
+            setup_logging(attacker_host, "ec2-user", user_to_attacker_key)
+            setup_target(os_name, attacker_host, "ec2-user", user_to_attacker_key)
+    if args.setup: 
+        attacker_host = get_attacker_ip() 
+        complete_setup = args.setup in [None, "all"]
+        if complete_setup or args.setup == "attacker":
+            setup_attacker()
+        if complete_setup or args.setup == "logging": 
+            setup_logging(attacker_host, "ec2-user", user_to_attacker_key)
+        if complete_setup or args.setup == "target":
+            setup_target(os_name, attacker_host, "ec2-user", user_to_attacker_key)
             
         print("\nDeployment complete.")
-
         # Display important information and next steps
         attacker_ip = get_attacker_ip()
         print("\n================ Deployment Summary ================")
         print(f"Attacker Public IP: {attacker_ip if attacker_ip else 'Not available'}")
-        print("\nNext Steps:")
+        print("Next Steps:")
         print("1. Connect to the attacker instance:")
         print("   Use the '--connect' command: \n   python deploy.py --connect")
         print("   (Alternatively, use: ssh -i <path-to-key> ec2-user@<attacker-ip>)")
-        print("2. Access Fleet server (if applicable): \n   Use the credentials in 'logging/fleet_credentials.yml'.")
-        print("3. Create snapshots of instances for backup:")
+        print("2. Access Kibana with port forwarding:")
+        print("   python deploy.py --connect kibana")
+        print("   Then open http://localhost:5601 in your browser")
+        print("3. Access Fleet server (if applicable): \n   Use the credentials in 'logging/.fleet_credentials.yml'.")
+        print("4. Create snapshots of instances for backup:")
         print("   Use the '--create-snapshot' command: \n   python deploy.py --create-snapshot <role>\n   (Roles: attacker, target, logging, or all)")
-        print("4. Review logs and ensure all services are running as expected.")
+        print("5. Review logs and ensure all services are running as expected.")
         print("===================================================\n")
     else:
         print("No valid action specified.")
